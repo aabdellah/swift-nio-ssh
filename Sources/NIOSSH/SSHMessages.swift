@@ -1373,7 +1373,7 @@ extension ByteBuffer {
         case .publicKey(.known(key: let key, signature: let signature)):
             writtenBytes += self.writeSSHString("publickey".utf8)
             writtenBytes += self.writeSSHBoolean(signature != nil)
-            writtenBytes += self.writeSSHString(key.keyPrefix)
+            writtenBytes += self.writeSSHString(key.signatureAlgorithm)
             writtenBytes += self.writeCompositeSSHString { buffer in
                 buffer.writeSSHHostKey(key)
             }

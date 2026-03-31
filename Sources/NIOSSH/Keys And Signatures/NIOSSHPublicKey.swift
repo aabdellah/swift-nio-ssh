@@ -206,6 +206,20 @@ extension NIOSSHPublicKey {
     /// The prefix of an RSA public key (used for both rsa-sha2-256 and rsa-sha2-512 in key wire format).
     internal static let rsaPublicKeyPrefix = "ssh-rsa".utf8
 
+    /// The algorithm identifier used in SSH user auth requests (RFC 8332).
+    /// For RSA, this returns `rsa-sha2-256`/`rsa-sha2-512` instead of `ssh-rsa`,
+    /// since modern OpenSSH (8.8+) rejects `ssh-rsa` signatures by default.
+    internal var signatureAlgorithm: String.UTF8View {
+        switch self.backingKey {
+        case .rsaSHA256:
+            return "rsa-sha2-256".utf8
+        case .rsaSHA512:
+            return "rsa-sha2-512".utf8
+        default:
+            return self.keyPrefix
+        }
+    }
+
     internal var keyPrefix: String.UTF8View {
         switch self.backingKey {
         case .ed25519:
@@ -227,6 +241,7 @@ extension NIOSSHPublicKey {
         [
             Self.ed25519PublicKeyPrefix, Self.ecdsaP384PublicKeyPrefix, Self.ecdsaP256PublicKeyPrefix,
             Self.ecdsaP521PublicKeyPrefix, Self.rsaPublicKeyPrefix,
+            "rsa-sha2-256".utf8, "rsa-sha2-512".utf8,
         ]
     }
 }
@@ -363,10 +378,11 @@ extension ByteBuffer {
                 return try buffer.readECDSAP384PublicKey()
             } else if keyIdentifierBytes.elementsEqual(NIOSSHPublicKey.ecdsaP521PublicKeyPrefix) {
                 return try buffer.readECDSAP521PublicKey()
-            } else if keyIdentifierBytes.elementsEqual(NIOSSHPublicKey.rsaPublicKeyPrefix) {
-                // Default to rsaSHA256 when reading from wire — the actual hash variant
-                // is determined by the signature algorithm negotiation, not the key format.
+            } else if keyIdentifierBytes.elementsEqual(NIOSSHPublicKey.rsaPublicKeyPrefix)
+                || keyIdentifierBytes.elementsEqual("rsa-sha2-256".utf8) {
                 return try buffer.readRSAPublicKey(variant: .sha256)
+            } else if keyIdentifierBytes.elementsEqual("rsa-sha2-512".utf8) {
+                return try buffer.readRSAPublicKey(variant: .sha512)
             } else {
                 // We don't know this public key type. Maybe the certified keys do.
                 return try buffer.readCertifiedKeyWithoutKeyPrefix(keyIdentifierBytes).map(NIOSSHPublicKey.init)
