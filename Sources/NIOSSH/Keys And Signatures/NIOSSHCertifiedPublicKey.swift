@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 import Crypto
+import _CryptoExtras
 import Dispatch
 import NIOCore
 
@@ -349,6 +350,10 @@ extension NIOSSHCertifiedPublicKey {
 
     static let ed25519KeyPrefix = "ssh-ed25519-cert-v01@openssh.com".utf8
 
+    static let rsaSHA256KeyPrefix = "rsa-sha2-256-cert-v01@openssh.com".utf8
+
+    static let rsaSHA512KeyPrefix = "rsa-sha2-512-cert-v01@openssh.com".utf8
+
     internal var keyPrefix: String.UTF8View {
         switch self.key.backingKey {
         case .ed25519:
@@ -359,6 +364,10 @@ extension NIOSSHCertifiedPublicKey {
             return Self.p384KeyPrefix
         case .ecdsaP521:
             return Self.p521KeyPrefix
+        case .rsaSHA256:
+            return Self.rsaSHA256KeyPrefix
+        case .rsaSHA512:
+            return Self.rsaSHA512KeyPrefix
         case .certified:
             preconditionFailure("base key cannot be certified")
         }
@@ -386,6 +395,10 @@ extension NIOSSHCertifiedPublicKey {
             return NIOSSHPublicKey.ecdsaP384PublicKeyPrefix
         } else if prefix.elementsEqual(Self.p521KeyPrefix) {
             return NIOSSHPublicKey.ecdsaP521PublicKeyPrefix
+        } else if prefix.elementsEqual(Self.rsaSHA256KeyPrefix) {
+            return NIOSSHPublicKey.rsaPublicKeyPrefix
+        } else if prefix.elementsEqual(Self.rsaSHA512KeyPrefix) {
+            return NIOSSHPublicKey.rsaPublicKeyPrefix
         } else {
             throw NIOSSHError.unknownPublicKey(algorithm: String(decoding: prefix, as: UTF8.self))
         }
