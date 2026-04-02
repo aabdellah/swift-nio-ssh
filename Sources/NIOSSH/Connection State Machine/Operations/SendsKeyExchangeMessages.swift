@@ -46,8 +46,14 @@ extension SendsKeyExchangeMessages {
     }
 
     mutating func writeNewKeysMessage(into buffer: inout ByteBuffer) throws {
+        let strictKex = self.keyExchangeStateMachine.strictKexEnabled
         let result = self.keyExchangeStateMachine.sendNewKeys()
         try self.serializer.serialize(message: .newKeys, to: &buffer)
         self.serializer.addEncryption(result)
+
+        // Strict KEX (Terrapin CVE-2023-48795): reset outbound sequence number after NEWKEYS.
+        if strictKex {
+            self.serializer.resetSequenceNumber()
+        }
     }
 }

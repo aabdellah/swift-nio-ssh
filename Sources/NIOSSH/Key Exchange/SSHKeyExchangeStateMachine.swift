@@ -93,6 +93,16 @@ struct SSHKeyExchangeStateMachine {
     private var protectionSchemes: [NIOSSHTransportProtection.Type]
     private var previousSessionIdentifier: ByteBuffer?
 
+    /// Whether strict KEX (Terrapin CVE-2023-48795 mitigation) is enabled.
+    /// This is set to true when both sides advertise the strict KEX extension
+    /// during the initial key exchange (previousSessionIdentifier == nil).
+    private(set) var strictKexEnabled: Bool = false
+
+    /// Whether this is the initial key exchange (not a rekey).
+    private var isInitialKeyExchange: Bool {
+        self.previousSessionIdentifier == nil
+    }
+
     init(
         allocator: ByteBufferAllocator,
         loop: EventLoop,
@@ -127,9 +137,24 @@ struct SSHKeyExchangeStateMachine {
         let encryptionAlgorithms = self.supportedEncryptionAlgorithms
         let macAlgorithms = self.supportedMacAlgorithms
 
+        // During initial key exchange, advertise the strict KEX extension.
+        var kexAlgorithms = Self.supportedKeyExchangeAlgorithms
+        if self.isInitialKeyExchange {
+            switch self.role {
+            case .client(let config):
+                if config.enableStrictKeyExchange {
+                    kexAlgorithms.append(Self.strictKexClientExtension)
+                }
+            case .server(let config):
+                if config.enableStrictKeyExchange {
+                    kexAlgorithms.append(Self.strictKexServerExtension)
+                }
+            }
+        }
+
         return .init(
             cookie: rng.randomCookie(allocator: self.allocator),
-            keyExchangeAlgorithms: Self.supportedKeyExchangeAlgorithms,
+            keyExchangeAlgorithms: kexAlgorithms,
             serverHostKeyAlgorithms: self.supportedHostKeyAlgorithms,
             encryptionAlgorithmsClientToServer: encryptionAlgorithms,
             encryptionAlgorithmsServerToClient: encryptionAlgorithms,
@@ -379,9 +404,28 @@ struct SSHKeyExchangeStateMachine {
         }
     }
 
-    private func negotiatedAlgorithms(_ message: SSHMessage.KeyExchangeMessage) throws -> NegotiationResult {
+    private mutating func negotiatedAlgorithms(_ message: SSHMessage.KeyExchangeMessage) throws -> NegotiationResult {
+        // During initial key exchange, detect strict KEX support from the peer.
+        if self.isInitialKeyExchange {
+            switch self.role {
+            case .client(let config):
+                // We're the client; check if the server advertised strict KEX.
+                let serverSupports = message.keyExchangeAlgorithms.contains(Self.strictKexServerExtension[...])
+                self.strictKexEnabled = config.enableStrictKeyExchange && serverSupports
+            case .server(let config):
+                // We're the server; check if the client advertised strict KEX.
+                let clientSupports = message.keyExchangeAlgorithms.contains(Self.strictKexClientExtension[...])
+                self.strictKexEnabled = config.enableStrictKeyExchange && clientSupports
+            }
+        }
+
+        // Strip strict KEX extension names from the peer's algorithm list before negotiation.
+        let peerKexAlgorithms = message.keyExchangeAlgorithms.filter {
+            $0 != Self.strictKexClientExtension[...] && $0 != Self.strictKexServerExtension[...]
+        }
+
         let (keyExchange, hostKey) = try self.negotiatedKeyExchangeAlgorithm(
-            peerKeyExchangeAlgorithms: message.keyExchangeAlgorithms,
+            peerKeyExchangeAlgorithms: peerKexAlgorithms,
             peerHostKeyAlgorithms: message.serverHostKeyAlgorithms
         )
         let (clientEncryption, clientMAC) = try self.negotiatedTransportProtection(
@@ -604,6 +648,10 @@ extension SSHKeyExchangeStateMachine {
     static let supportedServerHostKeyAlgorithms: [Substring] = [
         "ssh-ed25519", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp521",
     ]
+
+    /// Strict KEX extension names (Terrapin CVE-2023-48795 mitigation).
+    static let strictKexClientExtension: Substring = "kex-strict-c-v00@openssh.com"
+    static let strictKexServerExtension: Substring = "kex-strict-s-v00@openssh.com"
 }
 
 extension SSHKeyExchangeStateMachine {
