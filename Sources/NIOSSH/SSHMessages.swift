@@ -221,6 +221,7 @@ extension SSHMessage {
             case session
             case forwardedTCPIP(ForwardedTCPIP)
             case directTCPIP(DirectTCPIP)
+            case unknown(String)
         }
 
         struct ForwardedTCPIP: Equatable {
@@ -903,7 +904,7 @@ extension ByteBuffer {
                 )
 
             default:
-                throw NIOSSHError.unknownPacketType(diagnostic: "Channel request with \(typeRawValue)")
+                type = .unknown(typeRawValue)
             }
 
             return SSHMessage.ChannelOpenMessage(
@@ -1454,6 +1455,9 @@ extension ByteBuffer {
 
         case .directTCPIP:
             writtenBytes += self.writeSSHString("direct-tcpip".utf8)
+
+        case .unknown(let name):
+            writtenBytes += self.writeSSHString(name.utf8)
         }
 
         writtenBytes += self.writeInteger(message.senderChannel)
@@ -1477,6 +1481,10 @@ extension ByteBuffer {
             writtenBytes += self.writeInteger(UInt32(data.portToConnectTo))
             writtenBytes += self.writeSSHString((data.originatorAddress.ipAddress ?? "<nio-error>").utf8)
             writtenBytes += self.writeInteger(UInt32(data.originatorAddress.port ?? -1))
+
+        case .unknown:
+            // Unknown channel types have no additional data to write
+            break
         }
 
         return writtenBytes
