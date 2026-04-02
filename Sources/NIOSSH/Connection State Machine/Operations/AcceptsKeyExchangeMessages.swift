@@ -52,7 +52,13 @@ extension AcceptsKeyExchangeMessages {
 
     mutating func receiveNewKeysMessage() throws {
         // Received a new keys message. Apply the encryption keys to the parser.
+        let strictKex = self.keyExchangeStateMachine.strictKexEnabled
         let result = try self.keyExchangeStateMachine.handleNewKeys()
         self.parser.addEncryption(result)
+
+        // Strict KEX (Terrapin CVE-2023-48795): reset inbound sequence number after NEWKEYS.
+        if strictKex {
+            self.parser.resetSequenceNumber()
+        }
     }
 }

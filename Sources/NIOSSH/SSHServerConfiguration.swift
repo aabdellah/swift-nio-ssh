@@ -29,6 +29,13 @@ public struct SSHServerConfiguration {
     /// Supported data encryption algorithms
     public var transportProtectionSchemes: [NIOSSHTransportProtection.Type]
 
+    /// Whether to advertise and enable strict key exchange (Terrapin CVE-2023-48795 mitigation).
+    /// When enabled, the server advertises `kex-strict-s-v00@openssh.com` in its KEX_INIT.
+    /// If the client also advertises `kex-strict-c-v00@openssh.com`, strict KEX is activated,
+    /// which resets sequence numbers after SSH_MSG_NEWKEYS to prevent prefix truncation attacks.
+    /// Defaults to `true`.
+    public var enableStrictKeyExchange: Bool
+
     public init(
         hostKeys: [NIOSSHPrivateKey],
         userAuthDelegate: NIOSSHServerUserAuthenticationDelegate,
@@ -69,6 +76,7 @@ public struct SSHServerConfiguration {
         self.globalRequestDelegate = globalRequestDelegate ?? DefaultGlobalRequestDelegate()
         self.banner = banner
         self.transportProtectionSchemes = transportProtectionSchemes
+        self.enableStrictKeyExchange = true
     }
 }
 
