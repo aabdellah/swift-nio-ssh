@@ -33,6 +33,12 @@ struct SSHPacketParser {
         self.buffer.readerIndex
     }
 
+    /// Resets the inbound sequence number to 0.
+    /// Used by strict KEX (Terrapin CVE-2023-48795 mitigation) after receiving SSH_MSG_NEWKEYS.
+    mutating func resetSequenceNumber() {
+        self.sequenceNumber = 0
+    }
+
     init(isServer: Bool, allocator: ByteBufferAllocator) {
         self.isServer = isServer
         self.buffer = allocator.buffer(capacity: 0)
