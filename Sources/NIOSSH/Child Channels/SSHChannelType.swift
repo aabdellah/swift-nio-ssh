@@ -35,6 +35,12 @@ public enum SSHChannelType: Equatable, Sendable {
 
     /// "Forwarded TCP/IP" is a connection that was accepted from a listening socket and is being forwarded to the client.
     case forwardedTCPIP(ForwardedTCPIP)
+
+    /// An unknown or extension-defined channel type.
+    ///
+    /// Used for server-initiated channels with non-standard type names, such as
+    /// `auth-agent@openssh.com` (SSH agent forwarding) or `x11` (X11 forwarding).
+    case unknown(String)
 }
 
 extension SSHChannelType {
@@ -129,6 +135,8 @@ extension SSHChannelType {
                     originatorAddress: message.originatorAddress
                 )
             )
+        case .unknown(let name):
+            self = .unknown(name)
         }
     }
 }
@@ -154,6 +162,8 @@ extension SSHMessage.ChannelOpenMessage.ChannelType {
                     originatorAddress: data.originatorAddress
                 )
             )
+        case .unknown(let name):
+            self = .unknown(name)
         }
     }
 }
