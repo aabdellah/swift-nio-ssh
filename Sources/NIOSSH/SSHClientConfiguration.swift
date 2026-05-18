@@ -46,6 +46,20 @@ public struct SSHClientConfiguration {
         )
     }
 
+    /// Restrict host-key algorithm negotiation to this ordered list.
+    ///
+    /// When non-nil and non-empty, the client advertises only these algorithms in
+    /// its SSH_MSG_KEXINIT `server_host_key_algorithms` field. The server must
+    /// advertise at least one algorithm from this list; if there is no overlap the
+    /// connection fails with `NIOSSHError.keyExchangeNegotiationFailure`.
+    ///
+    /// Pass `nil` (the default) to use the library's built-in algorithm list.
+    ///
+    /// Wire-format names: `"ssh-ed25519"`, `"ecdsa-sha2-nistp256"`,
+    /// `"ecdsa-sha2-nistp384"`, `"ecdsa-sha2-nistp521"`,
+    /// `"rsa-sha2-256"`, `"rsa-sha2-512"`, `"ssh-rsa"`.
+    public var preferredHostKeyAlgorithms: [Substring]?
+
     public init(
         userAuthDelegate: NIOSSHClientUserAuthenticationDelegate,
         serverAuthDelegate: NIOSSHClientServerAuthenticationDelegate,
@@ -57,6 +71,7 @@ public struct SSHClientConfiguration {
         self.globalRequestDelegate = globalRequestDelegate ?? DefaultGlobalRequestDelegate()
         self.transportProtectionSchemes = transportProtectionSchemes
         self.enableStrictKeyExchange = true
+        self.preferredHostKeyAlgorithms = nil
     }
 }
 
