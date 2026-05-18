@@ -560,7 +560,12 @@ struct SSHKeyExchangeStateMachine {
     // The host key algorithms supported by this peer, in order of preference.
     private var supportedHostKeyAlgorithms: [Substring] {
         switch self.role {
-        case .client:
+        case .client(let configuration):
+            // Honor caller-supplied preferred list when non-nil/non-empty; otherwise
+            // fall back to the built-in static list so existing clients are unaffected.
+            if let preferred = configuration.preferredHostKeyAlgorithms, !preferred.isEmpty {
+                return preferred
+            }
             return Self.supportedServerHostKeyAlgorithms
         case .server(let configuration):
             return configuration.hostKeys.flatMap { $0.hostKeyAlgorithms }
