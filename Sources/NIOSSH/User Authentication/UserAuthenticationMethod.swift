@@ -33,7 +33,14 @@ public struct NIOSSHAvailableUserAuthenticationMethods: OptionSet, Sendable {
     /// Host-based authentication is acceptable.
     public static let hostBased: NIOSSHAvailableUserAuthenticationMethods = .init(rawValue: 1 << 2)
 
-    /// A short-hand for all supported authentication types.
+    /// RFC 4256 keyboard-interactive authentication is acceptable.
+    public static let keyboardInteractive: NIOSSHAvailableUserAuthenticationMethods = .init(rawValue: 1 << 3)
+
+    /// A short-hand for all server-advertisable authentication types.
+    ///
+    /// - Note: `keyboardInteractive` is intentionally excluded: this fork only implements the
+    ///   client side of RFC 4256, so a server must not advertise it. Clients still offer
+    ///   keyboard-interactive explicitly via their auth delegate regardless of this set.
     public static let all: NIOSSHAvailableUserAuthenticationMethods = [.publicKey, .password, .hostBased]
 }
 
@@ -49,6 +56,8 @@ extension NIOSSHAvailableUserAuthenticationMethods {
                 self.insert(.password)
             case "hostbased":
                 self.insert(.hostBased)
+            case "keyboard-interactive":
+                self.insert(.keyboardInteractive)
             default:
                 // This is an unknown method, which we ignore.
                 break
@@ -73,6 +82,9 @@ extension NIOSSHAvailableUserAuthenticationMethods {
         }
         if self.contains(.hostBased) {
             methods.append("hostbased")
+        }
+        if self.contains(.keyboardInteractive) {
+            methods.append("keyboard-interactive")
         }
 
         return methods
@@ -180,6 +192,9 @@ extension NIOSSHUserAuthenticationOffer {
         /// The client would like to perform password authentication.
         case password(Password)
 
+        /// The client would like to perform RFC 4256 keyboard-interactive authentication.
+        case keyboardInteractive(KeyboardInteractive)
+
         /// The client would like to perform host-based authentication.
         ///
         /// This method is currently unsupported by ``NIOSSH``.
@@ -224,6 +239,22 @@ extension NIOSSHUserAuthenticationOffer.Offer {
         }
     }
 
+    /// Information provided by the client when attempting to perform RFC 4256
+    /// keyboard-interactive authentication.
+    ///
+    /// The actual challenge responses are produced lazily, per `INFO_REQUEST` round, via
+    /// ``NIOSSHClientUserAuthenticationDelegate/respondToKeyboardInteractiveChallenge(name:instruction:prompts:responsePromise:)``.
+    public struct KeyboardInteractive: Sendable {
+        /// The comma-separated submethods string sent in the initial
+        /// `SSH_MSG_USERAUTH_REQUEST` (RFC 4256 ยง3.1). Defaults to empty,
+        /// meaning "server chooses".
+        public var submethods: String
+
+        public init(submethods: String = "") {
+            self.submethods = submethods
+        }
+    }
+
     /// Information provided by the client when attempting to perform host-based authentication.
     ///
     /// This method is currently unsupported by ``NIOSSH``.
@@ -252,6 +283,8 @@ extension SSHMessage.UserAuthRequestMessage {
             self.method = .publicKey(.known(key: privateKeyRequest.publicKey, signature: signature))
         case .password(let passwordRequest):
             self.method = .password(passwordRequest.password)
+        case .keyboardInteractive(let kbdRequest):
+            self.method = .keyboardInteractive(kbdRequest.submethods)
         case .hostBased:
             fatalError("Unsupported")
         case .none:

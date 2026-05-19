@@ -342,6 +342,11 @@ struct SSHConnectionStateMachine {
                         self = .userAuthentication(state)
                         return result
 
+                    case .userAuthInfoRequest(let message):
+                        let result = try state.receiveUserAuthInfoRequest(message)
+                        self = .userAuthentication(state)
+                        return result
+
                     case .userAuthBanner(let message):
                         let result = try state.receiveUserAuthBanner(message)
                         self = .userAuthentication(state)
@@ -960,6 +965,12 @@ struct SSHConnectionStateMachine {
 
             case .userAuthRequest(let message):
                 try state.writeUserAuthRequest(message, into: &buffer)
+                // Keep the parser's #60 disambiguation in sync with the in-flight method.
+                state.syncKeyboardInteractiveExpectation()
+                self.state = .userAuthentication(state)
+
+            case .userAuthInfoResponse(let message):
+                try state.serializer.serialize(message: .userAuthInfoResponse(message), to: &buffer)
                 self.state = .userAuthentication(state)
 
             case .userAuthSuccess:

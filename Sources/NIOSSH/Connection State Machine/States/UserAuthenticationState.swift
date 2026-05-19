@@ -58,6 +58,16 @@ extension SSHConnectionStateMachine {
         mutating func bufferInboundData(_ data: inout ByteBuffer) {
             self.parser.append(bytes: &data)
         }
+
+        /// Mirror the auth state machine's in-flight keyboard-interactive status onto the
+        /// packet parser so that inbound message number 60 is disambiguated correctly.
+        ///
+        /// This MUST be kept in sync whenever the client sends a `SSH_MSG_USERAUTH_REQUEST`:
+        /// disambiguating message 60 by the byte alone would silently corrupt password auth.
+        mutating func syncKeyboardInteractiveExpectation() {
+            self.parser.clientExpectingKeyboardInteractiveInfoRequest =
+                self.userAuthStateMachine.clientInFlightMethodIsKeyboardInteractive
+        }
     }
 }
 
