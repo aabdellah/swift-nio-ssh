@@ -20,6 +20,15 @@ struct UserAuthenticationStateMachine {
     private let loop: EventLoop
     private var sessionID: ByteBuffer
 
+    /// Whether the client's currently in-flight `SSH_MSG_USERAUTH_REQUEST` used the
+    /// `keyboard-interactive` method.
+    ///
+    /// This is the authoritative signal for disambiguating message number 60: when `true`,
+    /// an inbound byte `60` is `SSH_MSG_USERAUTH_INFO_REQUEST` (RFC 4256); when `false` it is
+    /// `SSH_MSG_USERAUTH_PK_OK` / `SSH_MSG_USERAUTH_PASSWD_CHANGEREQ` (RFC 4252). Disambiguating
+    /// by the byte alone would silently corrupt password authentication.
+    private(set) var clientInFlightMethodIsKeyboardInteractive: Bool = false
+
     // TODO: The server SHOULD limit the number of authentication attempts the client may make.
     init(role: SSHConnectionRole, loop: EventLoop, sessionID: ByteBuffer) {
         self.state = .idle
@@ -243,6 +252,79 @@ extension UserAuthenticationStateMachine {
         }
     }
 
+    /// We've received an RFC 4256 `SSH_MSG_USERAUTH_INFO_REQUEST` (message number 60,
+    /// disambiguated from `PK_OK`/`PASSWD_CHANGEREQ` by the in-flight method).
+    ///
+    /// The state machine owns the multi-round loop: the connection may receive several
+    /// `INFO_REQUEST` rounds before `USERAUTH_SUCCESS`/`USERAUTH_FAILURE`, so the state stays
+    /// `.awaitingResponses` and this method may be invoked repeatedly.
+    mutating func receiveUserAuthInfoRequest(
+        _ message: SSHMessage.UserAuthInfoRequestMessage
+    ) throws -> EventLoopFuture<SSHMessage.UserAuthInfoResponseMessage>? {
+        switch (self.delegate, self.state) {
+        case (.client(let delegate), .awaitingResponses):
+            guard self.clientInFlightMethodIsKeyboardInteractive else {
+                // The server sent message 60 but we are not running a keyboard-interactive
+                // attempt. This is a protocol violation; treating the byte as INFO_REQUEST
+                // here would mean we had misparsed it, so reject loudly.
+                throw NIOSSHError.protocolViolation(
+                    protocolName: Self.protocolName,
+                    violation: "received INFO_REQUEST outside a keyboard-interactive attempt"
+                )
+            }
+
+            // RFC 4256 ยง3.3: a zero-prompt request is answered with an empty INFO_RESPONSE
+            // and no user interaction (matching OpenSSH behaviour).
+            if message.prompts.isEmpty {
+                return self.loop.makeSucceededFuture(.init(responses: []))
+            }
+
+            let prompts = message.prompts.map {
+                KeyboardInteractivePrompt(prompt: $0.prompt, echo: $0.echo)
+            }
+            let expectedResponseCount = prompts.count
+            let promise = self.loop.makePromise(of: [String].self)
+            delegate.respondToKeyboardInteractiveChallenge(
+                name: message.name,
+                instruction: message.instruction,
+                prompts: prompts,
+                responsePromise: promise
+            )
+
+            return promise.futureResult.flatMapThrowing { responses in
+                // RFC 4256 ยง3.4: num-responses MUST equal num-prompts.
+                guard responses.count == expectedResponseCount else {
+                    throw NIOSSHError.protocolViolation(
+                        protocolName: Self.protocolName,
+                        violation:
+                            "keyboard-interactive responses (\(responses.count)) do not match prompts (\(expectedResponseCount))"
+                    )
+                }
+                return SSHMessage.UserAuthInfoResponseMessage(responses: responses)
+            }
+
+        case (.client, .authenticationSucceeded):
+            // We should ignore all further auth messages in this state.
+            return nil
+        case (.client, .idle), (.client, .awaitingServiceAcceptance):
+            throw NIOSSHError.protocolViolation(
+                protocolName: Self.protocolName,
+                violation: "unsolicited INFO_REQUEST message"
+            )
+        case (.client, .awaitingNextRequest), (.client, .authenticationFailed):
+            throw NIOSSHError.protocolViolation(
+                protocolName: Self.protocolName,
+                violation: "unsolicited INFO_REQUEST message"
+            )
+        case (.server, _):
+            // Servers may never receive INFO_REQUEST messages.
+            throw NIOSSHError.protocolViolation(
+                protocolName: Self.protocolName,
+                violation: "client sent INFO_REQUEST"
+            )
+        }
+    }
+
     mutating func receiveUserAuthBanner(_: SSHMessage.UserAuthBannerMessage) throws {
         switch (self.delegate, self.state) {
         case (.client, .idle), (.client, .authenticationSucceeded):
@@ -301,9 +383,14 @@ extension UserAuthenticationStateMachine {
         }
     }
 
-    mutating func sendUserAuthRequest(_: SSHMessage.UserAuthRequestMessage) {
+    mutating func sendUserAuthRequest(_ message: SSHMessage.UserAuthRequestMessage) {
         switch (self.delegate, self.state) {
         case (.client, .awaitingNextRequest):
+            if case .keyboardInteractive = message.method {
+                self.clientInFlightMethodIsKeyboardInteractive = true
+            } else {
+                self.clientInFlightMethodIsKeyboardInteractive = false
+            }
             self.state = .awaitingResponses(1)
         case (.client, .idle),
             (.client, .awaitingServiceAcceptance):
@@ -513,6 +600,14 @@ extension UserAuthenticationStateMachine {
 
         case .publicKey(.unknown):
             // We don't known the algorithm, the auth attempt has failed.
+            return self.loop.makeSucceededFuture(
+                .failure(.init(authentications: delegate.supportedAuthenticationMethods.strings, partialSuccess: false))
+            )
+
+        case .keyboardInteractive:
+            // Server-side keyboard-interactive (issuing INFO_REQUEST challenges) is not
+            // implemented: this fork only supports the client side of RFC 4256. Reject the
+            // attempt so the client can fall back to another method.
             return self.loop.makeSucceededFuture(
                 .failure(.init(authentications: delegate.supportedAuthenticationMethods.strings, partialSuccess: false))
             )

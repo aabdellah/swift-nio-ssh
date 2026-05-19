@@ -111,6 +111,20 @@ extension AcceptsUserAuthMessages {
         }
     }
 
+    mutating func receiveUserAuthInfoRequest(
+        _ message: SSHMessage.UserAuthInfoRequestMessage
+    ) throws -> SSHConnectionStateMachine.StateMachineInboundProcessResult {
+        let result = try self.userAuthStateMachine.receiveUserAuthInfoRequest(message)
+
+        if let future = result {
+            return .possibleFutureMessage(
+                future.map { SSHMultiMessage(.userAuthInfoResponse($0)) }
+            )
+        } else {
+            return .noMessage
+        }
+    }
+
     mutating func receiveUserAuthBanner(
         _ message: SSHMessage.UserAuthBannerMessage
     ) throws -> SSHConnectionStateMachine.StateMachineInboundProcessResult {

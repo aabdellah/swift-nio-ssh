@@ -14,6 +14,33 @@
 
 import NIOCore
 
+/// A single prompt within an RFC 4256 keyboard-interactive `SSH_MSG_USERAUTH_INFO_REQUEST`.
+public struct KeyboardInteractivePrompt: Hashable, Sendable {
+    /// The text to display to the user.
+    public let prompt: String
+
+    /// Whether the user's typed response should be echoed.
+    ///
+    /// `false` indicates a secret (e.g. a password or OTP) and the response should be obscured.
+    public let echo: Bool
+
+    public init(prompt: String, echo: Bool) {
+        self.prompt = prompt
+        self.echo = echo
+    }
+}
+
+/// An error indicating that a ``NIOSSHClientUserAuthenticationDelegate`` does not support
+/// RFC 4256 keyboard-interactive authentication.
+///
+/// The default implementation of
+/// ``NIOSSHClientUserAuthenticationDelegate/respondToKeyboardInteractiveChallenge(name:instruction:prompts:responsePromise:)``
+/// fails the response promise with this error so that existing conformers continue to compile
+/// and behave unchanged.
+public struct NIOSSHKeyboardInteractiveUnsupportedError: Error, Hashable, Sendable {
+    public init() {}
+}
+
 /// A ``NIOSSHClientUserAuthenticationDelegate`` is an object that can provide a sequence of
 /// SSH user authentication methods based on the the acceptable list from the server.
 ///
@@ -38,4 +65,40 @@ public protocol NIOSSHClientUserAuthenticationDelegate {
         availableMethods: NIOSSHAvailableUserAuthenticationMethods,
         nextChallengePromise: EventLoopPromise<NIOSSHUserAuthenticationOffer?>
     )
+
+    /// Called when the server issues an RFC 4256 keyboard-interactive
+    /// `SSH_MSG_USERAUTH_INFO_REQUEST` and the delegate must supply responses.
+    ///
+    /// The state machine owns the multi-round loop: this method may be invoked more than once
+    /// for a single keyboard-interactive offer, once per `INFO_REQUEST` round, until the server
+    /// reports success or failure. The delegate must complete `responsePromise` with exactly
+    /// one response string per prompt, in order. To abandon keyboard-interactive
+    /// authentication, fail `responsePromise`; the auth attempt is then treated as a failure.
+    ///
+    /// A default implementation is provided that fails the promise with
+    /// ``NIOSSHKeyboardInteractiveUnsupportedError``, so existing conformers compile unchanged.
+    ///
+    /// - parameters:
+    ///     - name: The `name` field of the request (may be empty).
+    ///     - instruction: The `instruction` field of the request (may be empty).
+    ///     - prompts: The prompts to present to the user. May be empty, in which case the
+    ///       state machine answers with an empty response without invoking this method.
+    ///     - responsePromise: An `EventLoopPromise` to be fulfilled with one response per prompt.
+    func respondToKeyboardInteractiveChallenge(
+        name: String,
+        instruction: String,
+        prompts: [KeyboardInteractivePrompt],
+        responsePromise: EventLoopPromise<[String]>
+    )
+}
+
+extension NIOSSHClientUserAuthenticationDelegate {
+    public func respondToKeyboardInteractiveChallenge(
+        name: String,
+        instruction: String,
+        prompts: [KeyboardInteractivePrompt],
+        responsePromise: EventLoopPromise<[String]>
+    ) {
+        responsePromise.fail(NIOSSHKeyboardInteractiveUnsupportedError())
+    }
 }
