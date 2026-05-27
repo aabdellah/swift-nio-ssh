@@ -96,11 +96,18 @@ extension NIOSSHPublicKey {
                 key.isValidSignature(sig, for: digestPtr)
             }
         case (.rsaSHA256(let key), .rsaSHA256(let sig)):
+            // RFC 8332 §3: rsa-sha2-256 signs SHA-256 of the message bytes
+            // (here, the bytes of `digest`, which is the KEX exchange hash).
+            // The Digest overload of isValidSignature does NOT rehash, so we
+            // must hash the exchange hash bytes with SHA-256 ourselves before
+            // verification — matching the symmetric `for: bytes` overload.
             let rsaSig = _RSA.Signing.RSASignature(rawRepresentation: sig.rawBytes)
-            return key.isValidSignature(rsaSig, for: digest, padding: .insecurePKCS1v1_5)
+            let signedDigest = digest.withUnsafeBytes { SHA256.hash(data: $0) }
+            return key.isValidSignature(rsaSig, for: signedDigest, padding: .insecurePKCS1v1_5)
         case (.rsaSHA512(let key), .rsaSHA512(let sig)):
             let rsaSig = _RSA.Signing.RSASignature(rawRepresentation: sig.rawBytes)
-            return key.isValidSignature(rsaSig, for: digest, padding: .insecurePKCS1v1_5)
+            let signedDigest = digest.withUnsafeBytes { SHA512.hash(data: $0) }
+            return key.isValidSignature(rsaSig, for: signedDigest, padding: .insecurePKCS1v1_5)
         case (.certified(let key), _):
             return key.isValidSignature(signature, for: digest)
         case (.ed25519, _),

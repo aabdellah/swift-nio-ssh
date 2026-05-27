@@ -314,7 +314,13 @@ struct SSHKeyExchangeStateMachine {
         case .keyExchangeInitSent(exchange: var exchanger, let negotiated):
             switch self.role {
             case .client:
-                guard message.hostKey.keyPrefix.elementsEqual(negotiated.negotiatedHostKeyAlgorithm.utf8) else {
+                // RFC 8332: for RSA the wire key-blob prefix ("ssh-rsa") differs
+                // from the signature algorithm name ("rsa-sha2-256"/"rsa-sha2-512").
+                // The negotiated value is the signature algorithm name; accept
+                // either form so single-algorithm clients (probeHostKey) work.
+                let acceptsKeyBlobPrefix = message.hostKey.keyPrefix.elementsEqual(negotiated.negotiatedHostKeyAlgorithm.utf8)
+                let acceptsSignatureAlg = message.hostKey.signatureAlgorithm.elementsEqual(negotiated.negotiatedHostKeyAlgorithm.utf8)
+                guard acceptsKeyBlobPrefix || acceptsSignatureAlg else {
                     throw NIOSSHError.invalidHostKeyForKeyExchange(
                         expected: negotiated.negotiatedHostKeyAlgorithm,
                         got: message.hostKey.keyPrefix
