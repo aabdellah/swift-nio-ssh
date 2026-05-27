@@ -357,6 +357,9 @@ extension SSHMessage {
             case windowChange(WindowChange)
             case xonXoff(Bool)
             case signal(String)
+            /// Outbound `auth-agent-req@openssh.com` (ssh -A). Zero-payload
+            /// channel request that asks the server to enable agent forwarding.
+            case authAgentReq
             case unknown
         }
 
@@ -1733,6 +1736,8 @@ extension ByteBuffer {
             writtenBytes += self.writeSSHString("xon-xoff".utf8)
         case .signal:
             writtenBytes += self.writeSSHString("signal".utf8)
+        case .authAgentReq:
+            writtenBytes += self.writeSSHString("auth-agent-req@openssh.com".utf8)
         case .unknown:
             preconditionFailure()
         }
@@ -1772,6 +1777,9 @@ extension ByteBuffer {
             writtenBytes += self.writeSSHBoolean(clientCanDo)
         case .signal(let name):
             writtenBytes += self.writeSSHString(name.utf8)
+        case .authAgentReq:
+            // Zero-payload — the request name string above is the entire body.
+            break
         case .unknown:
             preconditionFailure()
         }
