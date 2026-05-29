@@ -320,7 +320,15 @@ struct SSHKeyExchangeStateMachine {
                 // either form so single-algorithm clients (probeHostKey) work.
                 let acceptsKeyBlobPrefix = message.hostKey.keyPrefix.elementsEqual(negotiated.negotiatedHostKeyAlgorithm.utf8)
                 let acceptsSignatureAlg = message.hostKey.signatureAlgorithm.elementsEqual(negotiated.negotiatedHostKeyAlgorithm.utf8)
-                guard acceptsKeyBlobPrefix || acceptsSignatureAlg else {
+                // A host key arriving on the wire is an `ssh-rsa` blob (parsed as `.rsaSHA256`),
+                // so neither check above matches a negotiated `rsa-sha2-512`. RFC 8332 §1: a
+                // single `ssh-rsa` key blob is valid for EITHER SHA-2 signature algorithm, so
+                // accept any negotiated `rsa-sha2-*` when the presented blob is `ssh-rsa`.
+                let keyIsRSA = message.hostKey.keyPrefix.elementsEqual("ssh-rsa".utf8)
+                let negotiatedIsRSASHA2 =
+                    negotiated.negotiatedHostKeyAlgorithm == "rsa-sha2-256"
+                    || negotiated.negotiatedHostKeyAlgorithm == "rsa-sha2-512"
+                guard acceptsKeyBlobPrefix || acceptsSignatureAlg || (keyIsRSA && negotiatedIsRSASHA2) else {
                     throw NIOSSHError.invalidHostKeyForKeyExchange(
                         expected: negotiated.negotiatedHostKeyAlgorithm,
                         got: message.hostKey.keyPrefix
