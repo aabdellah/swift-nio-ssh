@@ -649,6 +649,54 @@ class EndToEndTests: XCTestCase {
         XCTAssertEqual(handler.rekeyInitiationCount, baseline)
     }
 
+    func testChannelDataSurvivesDataThresholdRekey() throws {
+        var harness = TestHarness()
+        // Low threshold so a rekey fires mid-stream.
+        harness.clientRekeyLimit = .init(dataBytes: 4096, interval: nil)
+        XCTAssertNoThrow(try self.channel.configureWithHarness(harness))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        // Open a child channel and wire a data accumulator onto the server side.
+        let clientChannel = try self.channel.createNewChannel()
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+        guard let serverChannel = self.channel.activeServerChannels.first else {
+            XCTFail("Server channel not created")
+            return
+        }
+        let accumulator = ChannelDataAccumulator()
+        XCTAssertNoThrow(try serverChannel.pipeline.syncOperations.addHandler(accumulator))
+
+        // Build a payload larger than dataBytes and stream it in chunks, interleaving
+        // interactInMemory so a rekey is triggered MID-STREAM.
+        let chunkSize = 1024
+        let chunkCount = 64  // 64 KiB total, well past the 4 KiB threshold.
+        var expected = ByteBuffer()
+        let baseline = self.channel.clientSSHHandler!.rekeyInitiationCount
+
+        for chunk in 0..<chunkCount {
+            var buffer = clientChannel.allocator.buffer(capacity: chunkSize)
+            // Distinct byte per chunk so ordering errors are visible.
+            buffer.writeBytes(Array(repeating: UInt8(chunk & 0xFF), count: chunkSize))
+            expected.writeBytes(buffer.readableBytesView)
+            clientChannel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(buffer)), promise: nil)
+            XCTAssertNoThrow(try self.channel.interactInMemory())
+        }
+
+        // Drain anything still in flight.
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        // (1) A rekey actually occurred mid-stream.
+        XCTAssertGreaterThan(self.channel.clientSSHHandler!.rekeyInitiationCount, baseline)
+
+        // (2) The connection did NOT disconnect: the child channel is still active.
+        XCTAssertEqual(self.channel.activeServerChannels.count, 1)
+
+        // (3) ALL written bytes were received intact and in order.
+        XCTAssertEqual(accumulator.received.readableBytes, expected.readableBytes)
+        XCTAssertEqual(accumulator.received, expected)
+    }
+
     func testDelayedHostKeyValidation() throws {
         class DelayedValidationDelegate: NIOSSHClientServerAuthenticationDelegate {
             var validationCount = 0
