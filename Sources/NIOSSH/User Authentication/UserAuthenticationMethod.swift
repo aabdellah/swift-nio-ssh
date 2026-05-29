@@ -266,21 +266,51 @@ extension NIOSSHUserAuthenticationOffer.Offer {
 }
 
 extension SSHMessage.UserAuthRequestMessage {
-    init(request: NIOSSHUserAuthenticationOffer, sessionID: ByteBuffer) throws {
+    /// RFC 8332 §3.3: prefer rsa-sha2-512, then rsa-sha2-256. Returns nil when the
+    /// server advertised no usable RSA SHA-2 algorithm (caller keeps current variant).
+    static func preferredRSAIsSHA512(serverSignatureAlgorithms: [Substring]?) -> Bool? {
+        guard let algs = serverSignatureAlgorithms else { return nil }
+        if algs.contains("rsa-sha2-512") { return true }
+        if algs.contains("rsa-sha2-256") { return false }
+        return nil
+    }
+
+    init(
+        request: NIOSSHUserAuthenticationOffer,
+        sessionID: ByteBuffer,
+        serverSignatureAlgorithms: [Substring]? = nil
+    ) throws {
         // We only ever ask for the ssh-connection service.
         self.username = request.username
         self.service = "ssh-connection"
 
         switch request.offer {
         case .privateKey(let privateKeyRequest):
+            // Pick the RSA variant from server-sig-algs (conservative when absent).
+            // Only re-wrap a plain (non-certificate) RSA key: a certificate carries its
+            // own public-key structure that must be preserved on the wire (C3 paths).
+            var privateKey = privateKeyRequest.privateKey
+            var publicKey = privateKeyRequest.publicKey
+            if case .certified = publicKey.backingKey {
+                // Certificate-backed offer: keep the offered key as-is.
+            } else if let raw = privateKey.rsaKeyAndIsSHA512,
+                let wantSHA512 = Self.preferredRSAIsSHA512(serverSignatureAlgorithms: serverSignatureAlgorithms),
+                wantSHA512 != raw.isSHA512
+            {
+                privateKey =
+                    wantSHA512
+                    ? NIOSSHPrivateKey(rsaSHA512Key: raw.key)
+                    : NIOSSHPrivateKey(rsaSHA256Key: raw.key)
+                publicKey = privateKey.publicKey  // reflects the chosen variant's algorithm name
+            }
             let dataToSign = UserAuthSignablePayload(
                 sessionIdentifier: sessionID,
                 userName: self.username,
                 serviceName: self.service,
-                publicKey: privateKeyRequest.publicKey
+                publicKey: publicKey
             )
-            let signature = try privateKeyRequest.privateKey.sign(dataToSign)
-            self.method = .publicKey(.known(key: privateKeyRequest.publicKey, signature: signature))
+            let signature = try privateKey.sign(dataToSign)
+            self.method = .publicKey(.known(key: publicKey, signature: signature))
         case .password(let passwordRequest):
             self.method = .password(passwordRequest.password)
         case .keyboardInteractive(let kbdRequest):

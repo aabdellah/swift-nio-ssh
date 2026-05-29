@@ -88,6 +88,16 @@ public struct NIOSSHPrivateKey: Sendable {
         #endif
         }
     }
+
+    /// The underlying RSA key + whether it is currently tagged SHA-512, or nil for
+    /// non-RSA keys. Used to re-wrap with a different RFC 8332 signature variant.
+    internal var rsaKeyAndIsSHA512: (key: _RSA.Signing.PrivateKey, isSHA512: Bool)? {
+        switch self.backingKey {
+        case .rsaSHA256(let key): return (key, false)
+        case .rsaSHA512(let key): return (key, true)
+        default: return nil
+        }
+    }
 }
 
 extension NIOSSHPrivateKey {

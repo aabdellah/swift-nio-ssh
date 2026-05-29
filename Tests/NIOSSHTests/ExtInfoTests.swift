@@ -42,4 +42,24 @@ final class ExtInfoTests: XCTestCase {
         // No actual extensions follow; a sane parser must reject, not allocate/spin.
         XCTAssertThrowsError(try buffer.readSSHMessage())
     }
+
+    func testRSAVariantSelection() {
+        // server prefers 512 → upgrade
+        XCTAssertEqual(
+            SSHMessage.UserAuthRequestMessage.preferredRSAIsSHA512(
+                serverSignatureAlgorithms: ["rsa-sha2-512", "rsa-sha2-256"]),
+            true)
+        // server only offers 256 → 256
+        XCTAssertEqual(
+            SSHMessage.UserAuthRequestMessage.preferredRSAIsSHA512(
+                serverSignatureAlgorithms: ["rsa-sha2-256"]),
+            false)
+        // no server-sig-algs → nil (conservative: keep the key's current variant)
+        XCTAssertNil(
+            SSHMessage.UserAuthRequestMessage.preferredRSAIsSHA512(serverSignatureAlgorithms: nil))
+        // server offers neither RSA SHA-2 name → nil (conservative)
+        XCTAssertNil(
+            SSHMessage.UserAuthRequestMessage.preferredRSAIsSHA512(
+                serverSignatureAlgorithms: ["ssh-ed25519"]))
+    }
 }
