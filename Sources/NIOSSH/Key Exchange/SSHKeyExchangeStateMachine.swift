@@ -623,13 +623,25 @@ struct SSHKeyExchangeStateMachine {
     }
 
     /// The encryption algorithms supported by this peer, in order of preference.
+    ///
+    /// Multiple registered schemes can share a cipher name (e.g. each `aes*-ctr` cipher is
+    /// paired with four different MACs), so we de-duplicate by first-seen order to keep the
+    /// advertised KEXINIT cipher list free of repeats while preserving preference ordering.
     private var supportedEncryptionAlgorithms: [Substring] {
-        self.protectionSchemes.map { Substring($0.cipherName) }
+        var seen = Set<Substring>()
+        return self.protectionSchemes.compactMap {
+            let n = Substring($0.cipherName)
+            return seen.insert(n).inserted ? n : nil
+        }
     }
 
     /// The MAC algorithms supported by this peer, in order of preference.
     private var supportedMacAlgorithms: [Substring] {
-        let schemes = self.protectionSchemes.compactMap { $0.macName.map { Substring($0) } }
+        var seen = Set<Substring>()
+        let schemes = self.protectionSchemes.compactMap { $0.macName }.compactMap { name -> Substring? in
+            let n = Substring(name)
+            return seen.insert(n).inserted ? n : nil
+        }
 
         // We do a weird thing here: if there are no MAC schemes, we lie and put one in. This is
         // because some schemes (such as AES-GCM in OpenSSH mode) ignore the MAC negotiation.

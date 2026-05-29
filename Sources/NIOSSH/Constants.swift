@@ -17,6 +17,14 @@ public enum Constants: Sendable {
 
     public static let bundledTransportProtectionSchemes: [(NIOSSHTransportProtection & _NIOSSHSendableMetatype).Type] =
         [
+            ChaCha20Poly1305TransportProtection.self,
             AES256GCMOpenSSHTransportProtection.self, AES128GCMOpenSSHTransportProtection.self,
+            // ETM before E&M, 256/192/128 by strength:
+            AES256CTR_HMACSHA512ETM.self, AES256CTR_HMACSHA256ETM.self,
+            AES192CTR_HMACSHA512ETM.self, AES192CTR_HMACSHA256ETM.self,
+            AES128CTR_HMACSHA512ETM.self, AES128CTR_HMACSHA256ETM.self,
+            AES256CTR_HMACSHA512.self, AES256CTR_HMACSHA256.self,
+            AES192CTR_HMACSHA512.self, AES192CTR_HMACSHA256.self,
+            AES128CTR_HMACSHA512.self, AES128CTR_HMACSHA256.self,
         ]
 }
