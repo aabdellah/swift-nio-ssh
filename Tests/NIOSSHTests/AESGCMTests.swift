@@ -48,7 +48,7 @@ final class AESGCMTests: XCTestCase {
 
         self.buffer.writeSSHPacket(
             message: .newKeys,
-            lengthEncrypted: aes128Encryptor.lengthEncrypted,
+            lengthIncludedInPadding: aes128Encryptor.lengthIncludedInPadding,
             blockSize: aes128Encryptor.cipherBlockSize
         )
         XCTAssertNoThrow(try aes128Encryptor.encryptPacket(&self.buffer, sequenceNumber: 0))
@@ -93,7 +93,7 @@ final class AESGCMTests: XCTestCase {
 
         self.buffer.writeSSHPacket(
             message: .newKeys,
-            lengthEncrypted: aes256Encryptor.lengthEncrypted,
+            lengthIncludedInPadding: aes256Encryptor.lengthIncludedInPadding,
             blockSize: aes256Encryptor.cipherBlockSize
         )
         XCTAssertNoThrow(try aes256Encryptor.encryptPacket(&self.buffer, sequenceNumber: 0))

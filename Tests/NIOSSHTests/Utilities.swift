@@ -127,6 +127,12 @@ class TestTransportProtection: NIOSSHTransportProtection {
         true
     }
 
+    // E&M-style test cipher: the length is encrypted as part of the body and counts toward the
+    // block-padding modulus (OpenSSH aadlen == 0).
+    var lengthIncludedInPadding: Bool {
+        true
+    }
+
     static var cipherName: String {
         "insecure-tiny-encription-cipher"
     }

@@ -72,6 +72,9 @@ extension AESCTRTransportProtection: NIOSSHTransportProtection {
     static var cipherBlockSize: Int { 16 }
     var macBytes: Int { Self.macIsSHA512 ? 64 : 32 }
     var lengthEncrypted: Bool { !Self.isETM }  // ETM => length on the wire is cleartext
+    // OpenSSH aadlen: ETM excludes the length from the padding modulus (aadlen == 4); E&M encrypts
+    // the length as part of the packet body and INCLUDES it (aadlen == 0).
+    var lengthIncludedInPadding: Bool { !Self.isETM }
 
     func updateKeys(_ newKeys: NIOSSHSessionKeys) throws {
         guard newKeys.outboundEncryptionKey.bitCount == Self.keySizes.encryptionKeySize * 8,

@@ -34,7 +34,11 @@ final class ChaCha20Poly1305TransportProtection: NIOSSHTransportProtection, _NIO
     static let cipherBlockSize = 8
     static let keySizes = ExpectedKeySizes(ivSize: 0, encryptionKeySize: 64, macKeySize: 0)
     let macBytes = 16
+    // The length field IS encrypted on the wire (under K_1), so the parser must decrypt it first.
     let lengthEncrypted = true
+    // …but OpenSSH treats it as AEAD additional authenticated data (aadlen == 4) and EXCLUDES it
+    // from the block-padding modulus. (`cipher-chachapoly.c` / `packet.c`.)
+    let lengthIncludedInPadding = false
 
     private var outboundK2: SymmetricKey  // payload + poly key
     private var outboundK1: SymmetricKey  // length

@@ -64,7 +64,7 @@ final class UtilitiesTests: XCTestCase {
 
         buffer.writeSSHPacket(
             message: message,
-            lengthEncrypted: client.lengthEncrypted,
+            lengthIncludedInPadding: client.lengthIncludedInPadding,
             blockSize: client.cipherBlockSize
         )
 

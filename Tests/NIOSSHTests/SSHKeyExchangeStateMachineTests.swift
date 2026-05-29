@@ -164,7 +164,7 @@ final class SSHKeyExchangeStateMachineTests: XCTestCase {
         do {
             buffer.writeSSHPacket(
                 message: message,
-                lengthEncrypted: client.lengthEncrypted,
+                lengthIncludedInPadding: client.lengthIncludedInPadding,
                 blockSize: client.cipherBlockSize
             )
             try client.encryptPacket(&buffer, sequenceNumber: 0)
@@ -183,7 +183,7 @@ final class SSHKeyExchangeStateMachineTests: XCTestCase {
         do {
             buffer.writeSSHPacket(
                 message: message,
-                lengthEncrypted: server.lengthEncrypted,
+                lengthIncludedInPadding: server.lengthIncludedInPadding,
                 blockSize: server.cipherBlockSize
             )
             try server.encryptPacket(&buffer, sequenceNumber: 0)

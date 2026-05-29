@@ -305,7 +305,7 @@ final class SSHPacketParserTests: XCTestCase {
         part = allocator.buffer(capacity: 1024)
         part.writeSSHPacket(
             message: .newKeys,
-            lengthEncrypted: protection.lengthEncrypted,
+            lengthIncludedInPadding: protection.lengthIncludedInPadding,
             blockSize: protection.cipherBlockSize
         )
         XCTAssertNoThrow(try protection.encryptPacket(&part, sequenceNumber: 2))
@@ -327,7 +327,7 @@ final class SSHPacketParserTests: XCTestCase {
         part = allocator.buffer(capacity: 1024)
         part.writeSSHPacket(
             message: .newKeys,
-            lengthEncrypted: protection.lengthEncrypted,
+            lengthIncludedInPadding: protection.lengthIncludedInPadding,
             blockSize: protection.cipherBlockSize
         )
         XCTAssertNoThrow(try protection.encryptPacket(&part, sequenceNumber: 2))

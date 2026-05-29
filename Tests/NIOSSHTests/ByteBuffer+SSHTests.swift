@@ -381,7 +381,7 @@ final class ByteBufferSSHTests: XCTestCase {
         var buffer = ByteBuffer()
         XCTAssertEqual(buffer.capacity, 0)
 
-        buffer.writeSSHPacket(message: .version("Tests_v1.0"), lengthEncrypted: false, blockSize: 8)
+        buffer.writeSSHPacket(message: .version("Tests_v1.0"), lengthIncludedInPadding: false, blockSize: 8)
 
         let writtenBytes = buffer.readBytes(length: 5)
         XCTAssertEqual(

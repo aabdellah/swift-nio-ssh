@@ -61,9 +61,29 @@ public protocol NIOSSHTransportProtection: AnyObject {
     /// The number of bytes consumed by the MAC
     var macBytes: Int { get }
 
-    /// Whether legnth of the packet will be encrypted. If length is not encrypted, it should be counted
-    /// when padding size is calculated.
+    /// Whether the 4-byte packet-length field is encrypted on the wire. This drives the
+    /// *decrypt-first-block* decision in the parser (whether the length must be decrypted before it
+    /// can be read). It does **not** decide whether the length counts toward the padding modulus —
+    /// see `lengthIncludedInPadding` for that, which is a deliberately distinct concern.
+    ///
+    /// (For `chacha20-poly1305@openssh.com` the length *is* encrypted — `true` — yet it is treated
+    /// as authenticated additional data and therefore *excluded* from the padding modulus. The two
+    /// properties must not be conflated.)
     var lengthEncrypted: Bool { get }
+
+    /// Whether the 4-byte packet-length field is counted in the block-padding modulus when framing an
+    /// outbound packet (RFC 4253 §6: the total `packet_length ‖ padding_length ‖ payload ‖ padding`
+    /// is padded to a multiple of the cipher block size).
+    ///
+    /// This mirrors OpenSSH's `aadlen` (`packet.c`: `len -= aadlen; padlen = block_size - (len %
+    /// block_size)`):
+    ///   - **AEAD ciphers** (`aes{128,256}-gcm@openssh.com`, `chacha20-poly1305@openssh.com`) and
+    ///     **Encrypt-then-MAC** (`…-etm@openssh.com`) schemes treat the length field as additional
+    ///     authenticated data (`aadlen == 4`); it is **excluded** from the modulus, so this is
+    ///     `false`.
+    ///   - **Encrypt-and-MAC** (legacy non-ETM `hmac-sha2-*`) schemes encrypt the length as part of
+    ///     the packet body (`aadlen == 0`); it is **included** in the modulus, so this is `true`.
+    var lengthIncludedInPadding: Bool { get }
 
     /// Create a new instance of this transport protection scheme with the given keys.
     init(initialKeys: NIOSSHSessionKeys) throws

@@ -53,14 +53,16 @@ struct SSHPacketSerializer {
                 preconditionFailure("only .version message is allowed at this point")
             }
         case .cleartext:
-            buffer.writeSSHPacket(message: message, lengthEncrypted: true, blockSize: 8)
+            // Pre-encryption framing has no cipher/MAC installed (OpenSSH: aadlen == 0), so the
+            // length field counts toward the block-8 padding modulus.
+            buffer.writeSSHPacket(message: message, lengthIncludedInPadding: true, blockSize: 8)
             self.sequenceNumber &+= 1
         case .encrypted(let protection):
             let index = buffer.readerIndex
             buffer.moveReaderIndex(to: buffer.writerIndex)
             buffer.writeSSHPacket(
                 message: message,
-                lengthEncrypted: protection.lengthEncrypted,
+                lengthIncludedInPadding: protection.lengthIncludedInPadding,
                 blockSize: protection.cipherBlockSize
             )
             try protection.encryptPacket(&buffer, sequenceNumber: self.sequenceNumber)
@@ -71,7 +73,7 @@ struct SSHPacketSerializer {
 }
 
 extension ByteBuffer {
-    mutating func writeSSHPacket(message: SSHMessage, lengthEncrypted: Bool, blockSize: Int) {
+    mutating func writeSSHPacket(message: SSHMessage, lengthIncludedInPadding: Bool, blockSize: Int) {
         let index = self.writerIndex
 
         /// Each packet is in the following format:
@@ -86,8 +88,13 @@ extension ByteBuffer {
         self.writeMultipleIntegers(UInt32(0), UInt8(0))
         let messageLength = self.writeSSHMessage(message)
 
-        // Depending on on whether packet length is encrypted, padding should reflect that
-        let payloadLength = lengthEncrypted ? messageLength + 5 : messageLength + 1
+        // RFC 4253 §6 / OpenSSH `packet.c`: the padding modulus is taken over
+        // `packet_length ‖ padding_length ‖ payload ‖ padding`, except that AEAD and ETM schemes
+        // treat the 4-byte packet_length field as additional authenticated data and EXCLUDE it
+        // (`len -= aadlen` with aadlen == 4). So the base we pad is:
+        //   - length INCLUDED (E&M / cleartext, aadlen == 0): 4 (length) + 1 (padlen) + payload
+        //   - length EXCLUDED (AEAD / ETM,      aadlen == 4):     1 (padlen) + payload
+        let payloadLength = lengthIncludedInPadding ? messageLength + 5 : messageLength + 1
 
         /// RFC 4253 § 6:
         /// random padding

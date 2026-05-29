@@ -67,6 +67,12 @@ extension AESGCMTransportProtection: NIOSSHTransportProtection {
         false
     }
 
+    // AEAD: the length is cleartext additional authenticated data (aadlen == 4), excluded from the
+    // block-padding modulus.
+    var lengthIncludedInPadding: Bool {
+        false
+    }
+
     func updateKeys(_ newKeys: NIOSSHSessionKeys) throws {
         guard newKeys.outboundEncryptionKey.bitCount == Self.keySizes.encryptionKeySize * 8,
             newKeys.inboundEncryptionKey.bitCount == Self.keySizes.encryptionKeySize * 8
