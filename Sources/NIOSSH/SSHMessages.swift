@@ -54,6 +54,7 @@ enum SSHMessage: Equatable {
     case channelRequest(ChannelRequestMessage)
     case channelSuccess(ChannelSuccessMessage)
     case channelFailure(ChannelFailureMessage)
+    case extInfo(ExtInfoMessage)
 }
 
 extension SSHMessage {
@@ -112,6 +113,19 @@ extension SSHMessage {
         var languagesClientToServer: [Substring]
         var languagesServerToClient: [Substring]
         var firstKexPacketFollows: Bool
+    }
+
+    /// RFC 8308 SSH_MSG_EXT_INFO. Sent by the peer after its first NEWKEYS.
+    struct ExtInfoMessage: Equatable {
+        static let id: UInt8 = 7
+        /// Max extensions we will parse from a single EXT_INFO (anti-DoS).
+        static let maxExtensions = 256
+
+        struct Extension: Equatable {
+            var name: String
+            var value: String
+        }
+        var extensions: [Extension]
     }
 
     enum NewKeysMessage {
@@ -572,6 +586,11 @@ extension ByteBuffer {
                     return nil
                 }
                 return .channelFailure(message)
+            case SSHMessage.ExtInfoMessage.id:
+                guard let message = try self.readExtInfoMessage() else {
+                    return nil
+                }
+                return .extInfo(message)
             default:
                 throw SSHMessage.ParsingError.unknownType(type)
             }
@@ -641,6 +660,32 @@ extension ByteBuffer {
                 return nil
             }
             return SSHMessage.ServiceAcceptMessage(service: service)
+        }
+    }
+
+    mutating func readExtInfoMessage() throws -> SSHMessage.ExtInfoMessage? {
+        try self.rewindOnNilOrError { `self` in
+            guard let count = self.readInteger(as: UInt32.self) else {
+                return nil
+            }
+            // Anti-DoS: reject an absurd extension count rather than looping/allocating.
+            guard count <= UInt32(SSHMessage.ExtInfoMessage.maxExtensions) else {
+                throw NIOSSHError.protocolViolation(
+                    protocolName: "ext-info",
+                    violation: "extension count \(count) exceeds maximum"
+                )
+            }
+            var extensions: [SSHMessage.ExtInfoMessage.Extension] = []
+            extensions.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let name = self.readSSHStringAsString(),
+                    let value = self.readSSHStringAsString()
+                else {
+                    return nil
+                }
+                extensions.append(.init(name: name, value: value))
+            }
+            return SSHMessage.ExtInfoMessage(extensions: extensions)
         }
     }
 
@@ -1325,6 +1370,9 @@ extension ByteBuffer {
         case .serviceAccept(let message):
             writtenBytes += self.writeInteger(SSHMessage.ServiceAcceptMessage.id)
             writtenBytes += self.writeServiceAcceptMessage(message)
+        case .extInfo(let message):
+            writtenBytes += self.writeInteger(SSHMessage.ExtInfoMessage.id)
+            writtenBytes += self.writeExtInfoMessage(message)
         case .keyExchange(let message):
             writtenBytes += self.writeInteger(SSHMessage.KeyExchangeMessage.id)
             writtenBytes += self.writeKeyExchangeMessage(message)
@@ -1431,6 +1479,16 @@ extension ByteBuffer {
 
     mutating func writeServiceAcceptMessage(_ message: SSHMessage.ServiceAcceptMessage) -> Int {
         self.writeSSHString(message.service.utf8)
+    }
+
+    mutating func writeExtInfoMessage(_ message: SSHMessage.ExtInfoMessage) -> Int {
+        var writtenBytes = 0
+        writtenBytes += self.writeInteger(UInt32(message.extensions.count))
+        for ext in message.extensions {
+            writtenBytes += self.writeSSHString(ext.name.utf8)
+            writtenBytes += self.writeSSHString(ext.value.utf8)
+        }
+        return writtenBytes
     }
 
     mutating func writeKeyExchangeMessage(_ message: SSHMessage.KeyExchangeMessage) -> Int {
