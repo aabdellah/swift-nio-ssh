@@ -68,6 +68,12 @@ extension SSHConnectionStateMachine {
             self.parser.clientExpectingKeyboardInteractiveInfoRequest =
                 self.userAuthStateMachine.clientInFlightMethodIsKeyboardInteractive
         }
+
+        mutating func receiveExtInfo(_ message: SSHMessage.ExtInfoMessage) {
+            for ext in message.extensions where ext.name == "server-sig-algs" {
+                self.userAuthStateMachine.setServerSignatureAlgorithms(ext.value.split(separator: ","))
+            }
+        }
     }
 }
 

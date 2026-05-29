@@ -62,6 +62,12 @@ extension SSHConnectionStateMachine {
         mutating func bufferInboundData(_ data: inout ByteBuffer) {
             self.parser.append(bytes: &data)
         }
+
+        mutating func receiveExtInfo(_ message: SSHMessage.ExtInfoMessage) {
+            for ext in message.extensions where ext.name == "server-sig-algs" {
+                self.userAuthStateMachine.setServerSignatureAlgorithms(ext.value.split(separator: ","))
+            }
+        }
     }
 }
 

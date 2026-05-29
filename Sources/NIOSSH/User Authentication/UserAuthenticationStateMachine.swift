@@ -20,6 +20,10 @@ struct UserAuthenticationStateMachine {
     private let loop: EventLoop
     private var sessionID: ByteBuffer
 
+    /// server-sig-algs from an inbound EXT_INFO (RFC 8308 §3.1), if received.
+    /// Used to pick the RSA user-auth signature variant. `nil` ⇒ conservative default.
+    private(set) var serverSignatureAlgorithms: [Substring]?
+
     /// Whether the client's currently in-flight `SSH_MSG_USERAUTH_REQUEST` used the
     /// `keyboard-interactive` method.
     ///
@@ -35,6 +39,10 @@ struct UserAuthenticationStateMachine {
         self.delegate = UserAuthDelegate(role: role)
         self.loop = loop
         self.sessionID = sessionID
+    }
+
+    mutating func setServerSignatureAlgorithms(_ algorithms: [Substring]) {
+        self.serverSignatureAlgorithms = algorithms
     }
 
     fileprivate static let serviceName: String = "ssh-userauth"

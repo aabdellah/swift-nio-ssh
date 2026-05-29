@@ -348,6 +348,21 @@ final class UserAuthenticationStateMachineTests: XCTestCase {
         XCTAssertNoThrow(try stateMachine.receiveUserAuthSuccess())
     }
 
+    func testServerSignatureAlgorithmsCaching() throws {
+        let delegate = SimplePasswordDelegate(username: "foo", password: "bar")
+        var stateMachine = UserAuthenticationStateMachine(
+            role: .client(.init(userAuthDelegate: delegate, serverAuthDelegate: AcceptAllHostKeysDelegate())),
+            loop: self.loop,
+            sessionID: self.sessionID
+        )
+
+        // No EXT_INFO received yet ⇒ conservative default (nil).
+        XCTAssertNil(stateMachine.serverSignatureAlgorithms)
+
+        stateMachine.setServerSignatureAlgorithms(["rsa-sha2-512", "rsa-sha2-256"])
+        XCTAssertEqual(stateMachine.serverSignatureAlgorithms, ["rsa-sha2-512", "rsa-sha2-256"])
+    }
+
     func testBasicSadClientFlow() throws {
         let delegate = SimplePasswordDelegate(username: "foo", password: "bar")
         var stateMachine = UserAuthenticationStateMachine(

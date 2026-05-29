@@ -61,6 +61,11 @@ extension SSHConnectionStateMachine {
         mutating func bufferInboundData(_ data: inout ByteBuffer) {
             self.parser.append(bytes: &data)
         }
+
+        func receiveExtInfo(_ message: SSHMessage.ExtInfoMessage) {
+            // Authenticated already; nothing to consume. Accept to avoid tearing down
+            // the connection (RFC 8308 permits EXT_INFO after the first auth too).
+        }
     }
 }
 

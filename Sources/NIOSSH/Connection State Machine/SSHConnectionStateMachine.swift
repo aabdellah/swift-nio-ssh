@@ -296,6 +296,11 @@ struct SSHConnectionStateMachine {
                     case .unimplemented(let unimplemented):
                         throw NIOSSHError.remotePeerDoesNotSupportMessage(unimplemented)
 
+                    case .extInfo(let message):
+                        state.receiveExtInfo(message)
+                        self = .receivedNewKeys(state)
+                        return .noMessage
+
                     default:
                         throw NIOSSHError.protocolViolation(
                             protocolName: "user auth",
@@ -363,6 +368,11 @@ struct SSHConnectionStateMachine {
 
                     case .unimplemented(let unimplemented):
                         throw NIOSSHError.remotePeerDoesNotSupportMessage(unimplemented)
+
+                    case .extInfo(let message):
+                        state.receiveExtInfo(message)
+                        self = .userAuthentication(state)
+                        return .noMessage
 
                     default:
                         throw NIOSSHError.protocolViolation(
@@ -432,6 +442,11 @@ struct SSHConnectionStateMachine {
                         return .noMessage
                     case .unimplemented(let unimplemented):
                         throw NIOSSHError.remotePeerDoesNotSupportMessage(unimplemented)
+
+                    case .extInfo(let message):
+                        state.receiveExtInfo(message)
+                        self = .active(state)
+                        return .noMessage
 
                     default:
                         throw NIOSSHError.protocolViolation(
