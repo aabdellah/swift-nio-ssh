@@ -454,6 +454,32 @@ final class SSHConnectionStateMachineTests: XCTestCase {
         XCTAssertTrue(server.isActive)
     }
 
+    func testCanRekeyOnlyWhenActive() throws {
+        let allocator = ByteBufferAllocator()
+        let loop = EmbeddedEventLoop()
+        var client = SSHConnectionStateMachine(
+            role: .client(
+                .init(userAuthDelegate: InfinitePasswordDelegate(), serverAuthDelegate: AcceptAllHostKeysDelegate())
+            )
+        )
+        var server = SSHConnectionStateMachine(
+            role: .server(
+                .init(
+                    hostKeys: [NIOSSHPrivateKey(ed25519Key: .init())],
+                    userAuthDelegate: DenyThenAcceptDelegate(messagesToDeny: 1)
+                )
+            )
+        )
+
+        // A fresh/idle state machine is not rekeyable.
+        XCTAssertFalse(client.canRekey)
+
+        try assertSuccessfulConnection(client: &client, server: &server, allocator: allocator, loop: loop)
+
+        // Once active, a client-initiated rekey may begin.
+        XCTAssertTrue(client.canRekey)
+    }
+
     // Messages that are usable once child channels are allowed.
     let channelMessages: [SSHMessage] = [
         .channelOpen(.init(type: .session, senderChannel: 0, initialWindowSize: 0, maximumPacketSize: 12)),

@@ -1260,6 +1260,14 @@ extension SSHConnectionStateMachine {
             preconditionFailure("May not rekey in this state: \(self.state)")
         }
     }
+
+    /// True iff a client-initiated rekey may begin right now (i.e. we are fully
+    /// active and not already rekeying). `beginRekeying` preconditionFailures
+    /// otherwise, so callers MUST gate on this.
+    var canRekey: Bool {
+        if case .active = self.state { return true }
+        return false
+    }
 }
 
 // MARK: Helper properties
