@@ -1306,6 +1306,19 @@ extension SSHConnectionStateMachine {
         }
     }
 
+    /// Test-only: the outbound packet sequence number while active. Used by strict-KEX
+    /// rekey tests to assert the sequence number was reset after a re-key's NEWKEYS.
+    var _testOnlyOutboundSequenceNumber: UInt32? {
+        if case .active(let state) = self.state { return state.serializer.sequenceNumber }
+        return nil
+    }
+
+    /// Test-only: the inbound packet sequence number while active.
+    var _testOnlyInboundSequenceNumber: UInt32? {
+        if case .active(let state) = self.state { return state.parser.sequenceNumber }
+        return nil
+    }
+
     var role: SSHConnectionRole {
         switch self.state {
         case .idle(let state):

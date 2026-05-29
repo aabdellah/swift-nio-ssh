@@ -1043,6 +1043,66 @@ final class SSHConnectionStateMachineTests: XCTestCase {
             XCTFail("Unexpected result: \(String(describing: result))")
         }
     }
+
+    /// strict KEX (draft-miller-sshm-strict-kex) requires the packet sequence numbers be
+    /// reset to zero after EVERY SSH_MSG_NEWKEYS — including re-keys, not just the initial
+    /// key exchange. Before the fix the fork only reset on the initial KEX (a rekey's fresh
+    /// key-exchange state machine never learned strict KEX was in effect), so after a rekey
+    /// the fork's sequence numbers diverged from a strict real peer (OpenSSH) that did reset
+    /// them — desyncing the AEAD nonce and silently stalling all post-rekey traffic.
+    ///
+    /// A NIO-to-NIO functional rekey test cannot catch this: both ends shared the same
+    /// non-reset behaviour and so stayed mutually consistent. We assert directly that the
+    /// sequence numbers were reset once the re-key completes.
+    func testStrictKexResetsSequenceNumbersOnRekey() throws {
+        let allocator = ByteBufferAllocator()
+        let loop = EmbeddedEventLoop()
+        var client = SSHConnectionStateMachine(
+            role: .client(
+                .init(userAuthDelegate: InfinitePasswordDelegate(), serverAuthDelegate: AcceptAllHostKeysDelegate())
+            )
+        )
+        var server = SSHConnectionStateMachine(
+            role: .server(
+                .init(
+                    hostKeys: [NIOSSHPrivateKey(ed25519Key: .init())],
+                    userAuthDelegate: DenyThenAcceptDelegate(messagesToDeny: 1)
+                )
+            )
+        )
+
+        try assertSuccessfulConnection(client: &client, server: &server, allocator: allocator, loop: loop)
+        XCTAssertTrue(client.isActive)
+        XCTAssertTrue(server.isActive)
+
+        // Kick off a client-initiated rekey and drive it to completion through the harness.
+        var buffer = allocator.buffer(capacity: 1024)
+        XCTAssertNoThrow(try client.beginRekeying(buffer: &buffer, allocator: allocator, loop: loop))
+        server.bufferInboundData(&buffer)
+        let serverResponse = try assertNoThrowWithValue(
+            server.processInboundMessage(allocator: allocator, loop: loop)
+        )
+        guard case .some(.emitMessage(let serverKexInit)) = serverResponse else {
+            XCTFail("Server should emit its KEXINIT in response to the rekey, got \(String(describing: serverResponse))")
+            return
+        }
+        try self.run(
+            clientMessage: nil,
+            client: &client,
+            serverMessage: serverKexInit,
+            server: &server,
+            allocator: allocator,
+            loop: loop
+        )
+
+        XCTAssertTrue(client.isActive, "client returns to active after the rekey")
+        XCTAssertTrue(server.isActive, "server returns to active after the rekey")
+
+        XCTAssertEqual(client._testOnlyOutboundSequenceNumber, 0, "client outbound seqno reset after rekey NEWKEYS")
+        XCTAssertEqual(client._testOnlyInboundSequenceNumber, 0, "client inbound seqno reset after rekey NEWKEYS")
+        XCTAssertEqual(server._testOnlyOutboundSequenceNumber, 0, "server outbound seqno reset after rekey NEWKEYS")
+        XCTAssertEqual(server._testOnlyInboundSequenceNumber, 0, "server inbound seqno reset after rekey NEWKEYS")
+    }
 }
 
 extension Optional where Wrapped == SSHMultiMessage {

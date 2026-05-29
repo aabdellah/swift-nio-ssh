@@ -94,9 +94,15 @@ struct SSHKeyExchangeStateMachine {
     private var previousSessionIdentifier: ByteBuffer?
 
     /// Whether strict KEX (Terrapin CVE-2023-48795 mitigation) is enabled.
-    /// This is set to true when both sides advertise the strict KEX extension
-    /// during the initial key exchange (previousSessionIdentifier == nil).
-    private(set) var strictKexEnabled: Bool = false
+    ///
+    /// On the INITIAL key exchange this is negotiated: set to true when both sides
+    /// advertise the strict KEX extension. On a RE-key the extension is never
+    /// re-advertised (it is a one-shot initial-KEX marker), so the value is inherited
+    /// from the connection via the `strictKeyExchangeEnabled` initializer parameter.
+    /// It governs whether the packet sequence numbers are reset after this exchange's
+    /// SSH_MSG_NEWKEYS — which strict KEX requires after EVERY key exchange, including
+    /// re-keys (draft-miller-sshm-strict-kex).
+    private(set) var strictKexEnabled: Bool
 
     /// Whether this is the initial key exchange (not a rekey).
     private var isInitialKeyExchange: Bool {
@@ -109,7 +115,8 @@ struct SSHKeyExchangeStateMachine {
         role: SSHConnectionRole,
         remoteVersion: String,
         protectionSchemes: [NIOSSHTransportProtection.Type],
-        previousSessionIdentifier: ByteBuffer?
+        previousSessionIdentifier: ByteBuffer?,
+        strictKeyExchangeEnabled: Bool = false
     ) {
         self.allocator = allocator
         self.loop = loop
@@ -118,6 +125,9 @@ struct SSHKeyExchangeStateMachine {
         self.state = .idle
         self.protectionSchemes = protectionSchemes
         self.previousSessionIdentifier = previousSessionIdentifier
+        // Initial KEX negotiates this in `negotiatedAlgorithms`; a rekey inherits the
+        // connection's already-negotiated value (the marker is not re-sent on rekey).
+        self.strictKexEnabled = strictKeyExchangeEnabled
 
         switch self.role {
         case .client:

@@ -31,6 +31,12 @@ extension SSHConnectionStateMachine {
 
         internal var sessionIdentifier: ByteBuffer
 
+        /// Whether strict KEX was negotiated on this connection's initial key exchange.
+        /// Threaded into each re-key's `SSHKeyExchangeStateMachine` so it resets sequence
+        /// numbers after the re-key's NEWKEYS (strict KEX requires this after EVERY key
+        /// exchange, not just the initial one — draft-miller-sshm-strict-kex).
+        internal var strictKexEnabled: Bool
+
         init(_ previous: UserAuthenticationState) {
             self.role = previous.role
             self.serializer = previous.serializer
@@ -38,6 +44,7 @@ extension SSHConnectionStateMachine {
             self.remoteVersion = previous.remoteVersion
             self.protectionSchemes = previous.protectionSchemes
             self.sessionIdentifier = previous.sessionIdentifier
+            self.strictKexEnabled = previous.strictKexEnabled
         }
 
         init(_ previous: RekeyingReceivedNewKeysState) {
@@ -47,6 +54,7 @@ extension SSHConnectionStateMachine {
             self.remoteVersion = previous.remoteVersion
             self.protectionSchemes = previous.protectionSchemes
             self.sessionIdentifier = previous.sessionIdentifier
+            self.strictKexEnabled = previous.keyExchangeStateMachine.strictKexEnabled
         }
 
         init(_ previous: RekeyingSentNewKeysState) {
@@ -56,6 +64,7 @@ extension SSHConnectionStateMachine {
             self.remoteVersion = previous.remoteVersion
             self.protectionSchemes = previous.protectionSchemes
             self.sessionIdentifier = previous.sessionIdentifier
+            self.strictKexEnabled = previous.keyExchangeStateMachine.strictKexEnabled
         }
 
         mutating func bufferInboundData(_ data: inout ByteBuffer) {
