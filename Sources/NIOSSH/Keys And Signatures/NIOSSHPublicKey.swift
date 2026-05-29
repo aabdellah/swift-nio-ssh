@@ -95,16 +95,23 @@ extension NIOSSHPublicKey {
             return digest.withUnsafeBytes { digestPtr in
                 key.isValidSignature(sig, for: digestPtr)
             }
-        case (.rsaSHA256(let key), .rsaSHA256(let sig)):
-            // RFC 8332 §3: rsa-sha2-256 signs SHA-256 of the message bytes
-            // (here, the bytes of `digest`, which is the KEX exchange hash).
-            // The Digest overload of isValidSignature does NOT rehash, so we
-            // must hash the exchange hash bytes with SHA-256 ourselves before
-            // verification — matching the symmetric `for: bytes` overload.
+        // RFC 8332 §3: rsa-sha2-256/512 sign SHA-256/512 of the message bytes (here, the
+        // bytes of `digest`, the KEX exchange hash). The Digest overload of isValidSignature
+        // does NOT rehash, so we hash the exchange-hash bytes ourselves before verification —
+        // matching the symmetric `for: bytes` overload and the (now-symmetric) sign path.
+        //
+        // A host key parsed from a handshake is an `ssh-rsa` wire blob, which `readSSHHostKey`
+        // always tags `.rsaSHA256` regardless of the negotiated rsa-sha2-512. Both RSA backing
+        // cases hold the IDENTICAL `_RSA.Signing.PublicKey`, so we select the SHA variant from
+        // the SIGNATURE tag (which carries the correct rsa-sha2-256/512 from the wire) rather
+        // than requiring the key tag to equal the signature tag (Option B cross-tag).
+        case (.rsaSHA256(let key), .rsaSHA256(let sig)),
+            (.rsaSHA512(let key), .rsaSHA256(let sig)):
             let rsaSig = _RSA.Signing.RSASignature(rawRepresentation: sig.rawBytes)
             let signedDigest = digest.withUnsafeBytes { SHA256.hash(data: $0) }
             return key.isValidSignature(rsaSig, for: signedDigest, padding: .insecurePKCS1v1_5)
-        case (.rsaSHA512(let key), .rsaSHA512(let sig)):
+        case (.rsaSHA256(let key), .rsaSHA512(let sig)),
+            (.rsaSHA512(let key), .rsaSHA512(let sig)):
             let rsaSig = _RSA.Signing.RSASignature(rawRepresentation: sig.rawBytes)
             let signedDigest = digest.withUnsafeBytes { SHA512.hash(data: $0) }
             return key.isValidSignature(rsaSig, for: signedDigest, padding: .insecurePKCS1v1_5)
@@ -114,6 +121,8 @@ extension NIOSSHPublicKey {
             (.ecdsaP256, _),
             (.ecdsaP384, _),
             (.ecdsaP521, _),
+            // RSA key vs a non-RSA signature (ed25519/ecdsa) — the RSA-vs-RSA tuples are fully
+            // matched above, so these only catch genuine key/signature-type mismatches → false.
             (.rsaSHA256, _),
             (.rsaSHA512, _):
             return false
