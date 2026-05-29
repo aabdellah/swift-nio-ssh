@@ -141,11 +141,17 @@ extension NIOSSHPublicKey {
             return key.isValidSignature(sig, for: bytes.readableBytesView)
         case (.ecdsaP521(let key), .ecdsaP521(let sig)):
             return key.isValidSignature(sig, for: bytes.readableBytesView)
-        case (.rsaSHA256(let key), .rsaSHA256(let sig)):
+        // RSA cross-tag (same Option B as the Digest overload): a host key parsed from the wire
+        // is an `ssh-rsa` blob always tagged `.rsaSHA256`, so select the SHA variant from the
+        // SIGNATURE tag rather than requiring key tag == sig tag. Both RSA backing cases hold
+        // the identical `_RSA.Signing.PublicKey`.
+        case (.rsaSHA256(let key), .rsaSHA256(let sig)),
+            (.rsaSHA512(let key), .rsaSHA256(let sig)):
             let rsaSig = _RSA.Signing.RSASignature(rawRepresentation: sig.rawBytes)
             let digest = SHA256.hash(data: bytes.readableBytesView)
             return key.isValidSignature(rsaSig, for: digest, padding: .insecurePKCS1v1_5)
-        case (.rsaSHA512(let key), .rsaSHA512(let sig)):
+        case (.rsaSHA256(let key), .rsaSHA512(let sig)),
+            (.rsaSHA512(let key), .rsaSHA512(let sig)):
             let rsaSig = _RSA.Signing.RSASignature(rawRepresentation: sig.rawBytes)
             let digest = SHA512.hash(data: bytes.readableBytesView)
             return key.isValidSignature(rsaSig, for: digest, padding: .insecurePKCS1v1_5)
