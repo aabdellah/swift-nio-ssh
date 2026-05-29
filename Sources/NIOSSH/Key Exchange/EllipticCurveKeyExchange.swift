@@ -333,13 +333,11 @@ extension EllipticCurveKeyExchange {
         sessionID: ByteBuffer,
         expectedKeySize: Int
     ) -> [UInt8] {
-        assert(expectedKeySize <= PrivateKey.Hasher.Digest.byteCount)
-        return Array(
-            self.generateSpecificHash(
-                baseHasher: baseHasher,
-                discriminatorByte: UInt8(ascii: "A"),
-                sessionID: sessionID
-            ).prefix(expectedKeySize)
+        self.deriveKey(
+            baseHasher: baseHasher,
+            discriminatorByte: UInt8(ascii: "A"),
+            sessionID: sessionID,
+            length: expectedKeySize
         )
     }
 
@@ -348,13 +346,11 @@ extension EllipticCurveKeyExchange {
         sessionID: ByteBuffer,
         expectedKeySize: Int
     ) -> [UInt8] {
-        assert(expectedKeySize <= PrivateKey.Hasher.Digest.byteCount)
-        return Array(
-            self.generateSpecificHash(
-                baseHasher: baseHasher,
-                discriminatorByte: UInt8(ascii: "B"),
-                sessionID: sessionID
-            ).prefix(expectedKeySize)
+        self.deriveKey(
+            baseHasher: baseHasher,
+            discriminatorByte: UInt8(ascii: "B"),
+            sessionID: sessionID,
+            length: expectedKeySize
         )
     }
 
@@ -363,14 +359,13 @@ extension EllipticCurveKeyExchange {
         sessionID: ByteBuffer,
         expectedKeySize: Int
     ) -> SymmetricKey {
-        assert(expectedKeySize <= PrivateKey.Hasher.Digest.byteCount)
-        return SymmetricKey.truncatingDigest(
-            self.generateSpecificHash(
+        SymmetricKey(
+            data: self.deriveKey(
                 baseHasher: baseHasher,
                 discriminatorByte: UInt8(ascii: "C"),
-                sessionID: sessionID
-            ),
-            length: expectedKeySize
+                sessionID: sessionID,
+                length: expectedKeySize
+            )
         )
     }
 
@@ -379,14 +374,13 @@ extension EllipticCurveKeyExchange {
         sessionID: ByteBuffer,
         expectedKeySize: Int
     ) -> SymmetricKey {
-        assert(expectedKeySize <= PrivateKey.Hasher.Digest.byteCount)
-        return SymmetricKey.truncatingDigest(
-            self.generateSpecificHash(
+        SymmetricKey(
+            data: self.deriveKey(
                 baseHasher: baseHasher,
                 discriminatorByte: UInt8(ascii: "D"),
-                sessionID: sessionID
-            ),
-            length: expectedKeySize
+                sessionID: sessionID,
+                length: expectedKeySize
+            )
         )
     }
 
@@ -395,14 +389,13 @@ extension EllipticCurveKeyExchange {
         sessionID: ByteBuffer,
         expectedKeySize: Int
     ) -> SymmetricKey {
-        assert(expectedKeySize <= PrivateKey.Hasher.Digest.byteCount)
-        return SymmetricKey.truncatingDigest(
-            self.generateSpecificHash(
+        SymmetricKey(
+            data: self.deriveKey(
                 baseHasher: baseHasher,
                 discriminatorByte: UInt8(ascii: "E"),
-                sessionID: sessionID
-            ),
-            length: expectedKeySize
+                sessionID: sessionID,
+                length: expectedKeySize
+            )
         )
     }
 
@@ -411,26 +404,38 @@ extension EllipticCurveKeyExchange {
         sessionID: ByteBuffer,
         expectedKeySize: Int
     ) -> SymmetricKey {
-        assert(expectedKeySize <= PrivateKey.Hasher.Digest.byteCount)
-        return SymmetricKey.truncatingDigest(
-            self.generateSpecificHash(
+        SymmetricKey(
+            data: self.deriveKey(
                 baseHasher: baseHasher,
                 discriminatorByte: UInt8(ascii: "F"),
-                sessionID: sessionID
-            ),
-            length: expectedKeySize
+                sessionID: sessionID,
+                length: expectedKeySize
+            )
         )
     }
 
-    private func generateSpecificHash(
-        baseHasher: PrivateKey.Hasher,
+    /// RFC 4253 §7.2 key derivation. The `baseHasher` must already be seeded with `K(mpint) ‖ H`.
+    ///
+    /// `K1 = HASH(K ‖ H ‖ X ‖ session_id)` where `X` is `discriminatorByte`, and for keys longer
+    /// than a single digest, `Kn = HASH(K ‖ H ‖ K1 ‖ … ‖ K(n-1))`. The derived key is the
+    /// first `length` bytes of `K1 ‖ K2 ‖ …`.
+    private func deriveKey(
+        baseHasher: PrivateKey.Hasher,      // already fed K(mpint) ‖ H
         discriminatorByte: UInt8,
-        sessionID: ByteBuffer
-    ) -> PrivateKey.Hasher.Digest {
-        var localHasher = baseHasher
-        localHasher.update(byte: discriminatorByte)
-        localHasher.update(data: sessionID.readableBytesView)
-        return localHasher.finalize()
+        sessionID: ByteBuffer,
+        length: Int
+    ) -> [UInt8] {
+        precondition(length <= 64, "C1 sanity bound: no current scheme needs > 64 bytes")
+        var h = baseHasher
+        h.update(byte: discriminatorByte)
+        h.update(data: sessionID.readableBytesView)
+        var out = Array(h.finalize())                 // K1
+        while out.count < length {
+            var hn = baseHasher                       // re-copy K‖H-seeded hasher
+            hn.update(data: out)                      // feed K1‖…‖K(n-1)
+            out.append(contentsOf: hn.finalize())     // append Kn
+        }
+        return Array(out.prefix(length))
     }
 }
 
@@ -453,16 +458,6 @@ extension KeyExchangeResult {
     ) {
         self.keys = innerResult.keys
         self.sessionID = innerResult.sessionID
-    }
-}
-
-extension SymmetricKey {
-    /// Creates a symmetric key by truncating a given digest.
-    fileprivate static func truncatingDigest<D: Digest>(_ digest: D, length: Int) -> SymmetricKey {
-        assert(length <= D.byteCount)
-        return digest.withUnsafeBytes { bodyPtr in
-            SymmetricKey(data: UnsafeRawBufferPointer(rebasing: bodyPtr.prefix(length)))
-        }
     }
 }
 
@@ -582,5 +577,29 @@ extension HashFunction {
             assert(bytePtr.count == 1, "Why is this 8 bit integer so large?")
             self.update(bufferPointer: bytePtr)
         }
+    }
+}
+
+/// A testable shim that exercises the *same* RFC 4253 §7.2 accumulation loop used in production
+/// `EllipticCurveKeyExchange.deriveKey`. Reached from tests via `@testable import NIOSSH`.
+///
+/// Where the production helper takes a pre-seeded `K(mpint) ‖ H` hasher, this shim seeds an empty
+/// hasher from `seed` so the test stays self-contained.
+enum NIOSSHKeyDerivation {
+    static func deriveForTest<H: HashFunction>(
+        seed: [UInt8], discriminator: UInt8, sessionID: [UInt8], length: Int, hash: H.Type
+    ) -> [UInt8] {
+        var base = H()
+        base.update(data: seed)
+        var h = base
+        h.update(data: [discriminator])
+        h.update(data: sessionID)
+        var out = Array(h.finalize())
+        while out.count < length {
+            var hn = base
+            hn.update(data: out)
+            out.append(contentsOf: hn.finalize())
+        }
+        return Array(out.prefix(length))
     }
 }
