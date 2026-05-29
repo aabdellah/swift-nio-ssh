@@ -69,7 +69,7 @@ final class UtilitiesTests: XCTestCase {
         )
 
         XCTAssertNoThrow(try client.encryptPacket(&buffer, sequenceNumber: 0))
-        XCTAssertNoThrow(try server.decryptFirstBlock(&buffer))
+        XCTAssertNoThrow(try server.decryptFirstBlock(&buffer, sequenceNumber: 0))
         var decoded = try server.decryptAndVerifyRemainingPacket(&buffer, sequenceNumber: 0)
         XCTAssertEqual(message, try decoded.readSSHMessage())
     }

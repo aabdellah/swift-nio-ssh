@@ -66,7 +66,7 @@ final class AESGCMTests: XCTestCase {
         )
 
         var bufferCopy = self.buffer!
-        XCTAssertNoThrow(try aes128Decryptor.decryptFirstBlock(&bufferCopy))
+        XCTAssertNoThrow(try aes128Decryptor.decryptFirstBlock(&bufferCopy, sequenceNumber: 0))
         XCTAssertEqual(bufferCopy, self.buffer)
 
         /// After decryption the plaintext should be a newKeys message.
@@ -111,7 +111,7 @@ final class AESGCMTests: XCTestCase {
         )
 
         var bufferCopy = self.buffer!
-        XCTAssertNoThrow(try aes256Decryptor.decryptFirstBlock(&bufferCopy))
+        XCTAssertNoThrow(try aes256Decryptor.decryptFirstBlock(&bufferCopy, sequenceNumber: 0))
         XCTAssertEqual(bufferCopy, self.buffer)
 
         /// After decryption the plaintext should be a newKeys message.

@@ -158,7 +158,7 @@ final class ChaCha20Poly1305Tests: XCTestCase {
 
         // Decrypt side. decryptFirstBlock reveals the length in place; then verify+decrypt.
         var inbound = wire
-        try prot.decryptFirstBlock(&inbound)
+        try prot.decryptFirstBlock(&inbound, sequenceNumber: sequenceNumber)
         let recovered = try prot.decryptAndVerifyRemainingPacket(
             &inbound, sequenceNumber: sequenceNumber
         )
@@ -223,7 +223,7 @@ final class ChaCha20Poly1305Tests: XCTestCase {
         try a.encryptPacket(&wire, sequenceNumber: 0)
 
         var inbound = wire
-        try b.decryptFirstBlock(&inbound)
+        try b.decryptFirstBlock(&inbound, sequenceNumber: 0)
         let recovered = try b.decryptAndVerifyRemainingPacket(&inbound, sequenceNumber: 0)
         XCTAssertEqual(Array(recovered.readableBytesView), payload)
     }
@@ -242,7 +242,7 @@ final class ChaCha20Poly1305Tests: XCTestCase {
         bytes[bytes.count - 1] ^= 0x01
         var tampered = ByteBufferAllocator().buffer(bytes: bytes)
 
-        try prot.decryptFirstBlock(&tampered)
+        try prot.decryptFirstBlock(&tampered, sequenceNumber: 7)
         XCTAssertThrowsError(
             try prot.decryptAndVerifyRemainingPacket(&tampered, sequenceNumber: 7)
         ) { error in
@@ -262,7 +262,7 @@ final class ChaCha20Poly1305Tests: XCTestCase {
         bytes[5] ^= 0x80
         var tampered = ByteBufferAllocator().buffer(bytes: bytes)
 
-        try prot.decryptFirstBlock(&tampered)
+        try prot.decryptFirstBlock(&tampered, sequenceNumber: 8)
         XCTAssertThrowsError(
             try prot.decryptAndVerifyRemainingPacket(&tampered, sequenceNumber: 8)
         ) { error in
@@ -278,9 +278,10 @@ final class ChaCha20Poly1305Tests: XCTestCase {
         try prot.encryptPacket(&wire, sequenceNumber: 100)
 
         var inbound = wire
-        // decryptFirstBlock uses the mirrored inbound seqnr (0 initially), and we verify with a
-        // mismatched seqnr — the tag (computed over seqnr 100's keystream) must fail.
-        try prot.decryptFirstBlock(&inbound)
+        // The parser feeds the SAME (here deliberately wrong) seqnr to both decrypt hooks. The
+        // packet was sealed under seqnr 100; decrypting/verifying under seqnr 101 derives the wrong
+        // ChaCha20 keystream and Poly1305 one-time key, so the tag check must fail.
+        try prot.decryptFirstBlock(&inbound, sequenceNumber: 101)
         XCTAssertThrowsError(
             try prot.decryptAndVerifyRemainingPacket(&inbound, sequenceNumber: 101)
         ) { error in
@@ -395,5 +396,77 @@ final class ChaCha20Poly1305Tests: XCTestCase {
         parser.append(bytes: &w2)
         guard case .some(.newKeys) = try parser.nextPacket() else { return XCTFail("packet 2") }
         XCTAssertEqual(parser.sequenceNumber, 3)
+    }
+
+    func testParserEncryptionAddedAfterPlaintextPackets() throws {
+        // Regression: in a real handshake, several PLAINTEXT packets (version, KEXINIT, KEXECDH,
+        // NEWKEYS) are exchanged before encryption is installed, so addEncryption happens while the
+        // parser's sequence number is already > 0. chacha's decryptFirstBlock derives its nonce
+        // from a sequence-number mirror; if that mirror assumes the first encrypted packet is
+        // seqnr 0 it builds the wrong K_1 keystream, mis-decrypts the length field, and the parser
+        // either mis-frames or waits forever. This reproduces the EndToEndTests hang in isolation.
+        let keys = TestKeys.chacha(key64: GoldenVectors.chachaKey64)
+        var serializer = SSHPacketSerializer()
+        var version = ByteBufferAllocator().buffer(capacity: 64)
+        try serializer.serialize(message: .version("SSH-2.0-OpenSSH_TEST"), to: &version)
+
+        var parser = SSHPacketParser(isServer: true, allocator: ByteBufferAllocator())
+        try feedVersion(to: &parser)
+
+        // Three plaintext packets to advance BOTH sides to sequence number 3 before encryption.
+        for _ in 0..<3 {
+            var w = ByteBufferAllocator().buffer(capacity: 128)
+            try serializer.serialize(message: .newKeys, to: &w)
+            parser.append(bytes: &w)
+            guard case .some(.newKeys) = try parser.nextPacket() else { return XCTFail("plaintext") }
+        }
+        XCTAssertEqual(serializer.sequenceNumber, 3)
+        XCTAssertEqual(parser.sequenceNumber, 3)
+
+        // Install encryption now (seqnr 3 on both sides), then exchange an encrypted packet.
+        serializer.addEncryption(try ChaCha20Poly1305TransportProtection(initialKeys: keys))
+        parser.addEncryption(try ChaCha20Poly1305TransportProtection(initialKeys: keys))
+
+        var enc = ByteBufferAllocator().buffer(capacity: 128)
+        try serializer.serialize(message: .newKeys, to: &enc)  // first ENCRYPTED packet, seqnr 3
+        parser.append(bytes: &enc)
+        guard case .some(.newKeys) = try parser.nextPacket() else {
+            return XCTFail("first encrypted packet failed to decode (decryptFirstBlock nonce drift)")
+        }
+        XCTAssertEqual(parser.sequenceNumber, 4)
+    }
+
+    func testSerializerPreservesPriorBytesInOutboundBuffer() throws {
+        // Regression: SSHPacketSerializer hands encryptPacket a buffer whose READABLE region is the
+        // new packet but which may carry earlier, not-yet-flushed bytes BEFORE the reader index
+        // (it does a moveReaderIndex(to: writerIndex) dance and restores the reader afterwards). An
+        // encryptPacket that calls buffer.clear() and rewrites from index 0 destroys those prior
+        // bytes and emits a buffer whose restored reader index lands past the writer index -> zero
+        // readable bytes reach the peer's parser. This was the true cause of the EndToEnd handshake
+        // hang. The fix overwrites the readable region in place; this test pins it.
+        let keys = TestKeys.chacha(key64: GoldenVectors.chachaKey64)
+        var serializer = SSHPacketSerializer()
+        var outbound = ByteBufferAllocator().buffer(capacity: 256)
+        try serializer.serialize(message: .version("SSH-2.0-OpenSSH_TEST"), to: &outbound)
+        serializer.addEncryption(try ChaCha20Poly1305TransportProtection(initialKeys: keys))
+
+        // Serialize TWO encrypted packets back-to-back into the SAME outbound buffer WITHOUT
+        // flushing between them. The version-line bytes plus the first encrypted packet sit before
+        // the reader index when the second packet is encrypted, exercising the in-place contract.
+        try serializer.serialize(message: .newKeys, to: &outbound)  // seqnr 0
+        try serializer.serialize(message: .newKeys, to: &outbound)  // seqnr 1
+
+        // The peer parses the single coalesced delivery: version line, then both encrypted packets.
+        var parser = SSHPacketParser(isServer: true, allocator: ByteBufferAllocator())
+        parser.append(bytes: &outbound)
+        guard case .some(.version) = try parser.nextPacket() else { return XCTFail("version") }
+        parser.addEncryption(try ChaCha20Poly1305TransportProtection(initialKeys: keys))
+        guard case .some(.newKeys) = try parser.nextPacket() else {
+            return XCTFail("first encrypted packet lost (clear() discarded prior outbound bytes?)")
+        }
+        guard case .some(.newKeys) = try parser.nextPacket() else {
+            return XCTFail("second encrypted packet lost (clear() discarded prior outbound bytes?)")
+        }
+        XCTAssertEqual(parser.sequenceNumber, 2)
     }
 }

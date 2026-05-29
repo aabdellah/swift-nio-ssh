@@ -80,7 +80,7 @@ extension AESGCMTransportProtection: NIOSSHTransportProtection {
         self.inboundNonce = try SSHAESGCMNonce(keyExchangeResult: newKeys.initialInboundIV)
     }
 
-    func decryptFirstBlock(_: inout ByteBuffer) throws {
+    func decryptFirstBlock(_: inout ByteBuffer, sequenceNumber _: UInt32) throws {
         // For us, decrypting the first block is very easy: do nothing. The length bytes are already
         // unencrypted!
     }

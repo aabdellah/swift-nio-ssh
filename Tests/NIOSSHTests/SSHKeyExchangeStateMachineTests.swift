@@ -168,7 +168,7 @@ final class SSHKeyExchangeStateMachineTests: XCTestCase {
                 blockSize: client.cipherBlockSize
             )
             try client.encryptPacket(&buffer, sequenceNumber: 0)
-            try server.decryptFirstBlock(&buffer)
+            try server.decryptFirstBlock(&buffer, sequenceNumber: 0)
             var messageBuffer = try server.decryptAndVerifyRemainingPacket(&buffer, sequenceNumber: 0)
             let decrypted = try messageBuffer.readSSHMessage()
             XCTAssertEqual(message, decrypted)
@@ -187,7 +187,7 @@ final class SSHKeyExchangeStateMachineTests: XCTestCase {
                 blockSize: server.cipherBlockSize
             )
             try server.encryptPacket(&buffer, sequenceNumber: 0)
-            try client.decryptFirstBlock(&buffer)
+            try client.decryptFirstBlock(&buffer, sequenceNumber: 0)
             var messageBuffer = try client.decryptAndVerifyRemainingPacket(&buffer, sequenceNumber: 0)
             let decrypted = try messageBuffer.readSSHMessage()
             XCTAssertEqual(message, decrypted)

@@ -172,7 +172,7 @@ class TestTransportProtection: NIOSSHTransportProtection {
         self.inboundMACKey = newKeys.inboundMACKey
     }
 
-    func decryptFirstBlock(_ source: inout ByteBuffer) throws {
+    func decryptFirstBlock(_ source: inout ByteBuffer, sequenceNumber _: UInt32) throws {
         let index = source.readerIndex
 
         guard let ciphertextView = source.viewBytes(at: index, length: Self.cipherBlockSize),

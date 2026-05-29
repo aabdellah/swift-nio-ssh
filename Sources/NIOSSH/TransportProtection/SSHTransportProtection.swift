@@ -84,10 +84,18 @@ public protocol NIOSSHTransportProtection: AnyObject {
     /// `source` now contain the plaintext length. The protection implementation is allowed to
     /// decrypt more if it chooses to, and may use the `source` buffer to store the result.
     ///
+    /// `sequenceNumber` is the SSH packet sequence number of the packet currently being framed —
+    /// the same value that will be passed to the matching `decryptAndVerifyRemainingPacket` call.
+    /// Schemes whose length cipher is keyed by the sequence number (e.g.
+    /// `chacha20-poly1305@openssh.com`, whose nonce is derived from it) require this to decrypt the
+    /// length correctly when encryption is installed mid-handshake at a non-zero sequence number.
+    /// Schemes with a cleartext length (AES-GCM, ETM) or a self-advancing running counter (AES-CTR
+    /// E&M) ignore it.
+    ///
     /// It is guaranteed that `decryptRemainingPacket` will be called with exactly the same buffer
     /// passed to `source`. Thus some implementations will be able to avoid storing state for
     /// partial packet decryption.
-    func decryptFirstBlock(_ source: inout ByteBuffer) throws
+    func decryptFirstBlock(_ source: inout ByteBuffer, sequenceNumber: UInt32) throws
 
     /// Decrypt the remainder of the packet.
     ///

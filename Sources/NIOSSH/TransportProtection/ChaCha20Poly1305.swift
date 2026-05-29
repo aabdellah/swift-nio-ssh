@@ -40,10 +40,6 @@ final class ChaCha20Poly1305TransportProtection: NIOSSHTransportProtection, _NIO
     private var outboundK1: SymmetricKey  // length
     private var inboundK2: SymmetricKey
     private var inboundK1: SymmetricKey
-    // Mirrors the parser's inbound sequence number so decryptFirstBlock (which gets no seqnr
-    // argument) can build the same nonce decryptAndVerifyRemainingPacket will use. Packets arrive
-    // in order, so this equals the seqnr of the packet currently being decrypted.
-    private var inboundSequenceNumber: UInt32 = 0
 
     required init(initialKeys: NIOSSHSessionKeys) throws {
         guard initialKeys.outboundEncryptionKey.bitCount == 64 * 8,
@@ -86,12 +82,15 @@ final class ChaCha20Poly1305TransportProtection: NIOSSHTransportProtection, _NIO
         return Array(ks.prefix(32))
     }
 
-    func decryptFirstBlock(_ source: inout ByteBuffer) throws {
+    func decryptFirstBlock(_ source: inout ByteBuffer, sequenceNumber: UInt32) throws {
         // Reveal the 4-byte (provisional) length: CTR-decrypt the first 4 bytes under K_1,
         // counter 0, in place — WITHOUT consuming K_2 keystream. The Poly1305 check happens
         // later in decryptAndVerifyRemainingPacket; the parser bounds length+macBytes meanwhile.
+        // The nonce is derived from the parser's authoritative `sequenceNumber` (the same value the
+        // matching decryptAndVerifyRemainingPacket receives), so this is correct even when
+        // encryption is installed mid-handshake at a non-zero sequence number.
         guard source.readableBytes >= 4 else { return }
-        let nonce = try Self.nonce(self.inboundSequenceNumber)
+        let nonce = try Self.nonce(sequenceNumber)
         let lenCT = Array(source.readableBytesView.prefix(4))
         let lenPT = try Insecure.ChaCha20CTR.encrypt(
             lenCT, using: inboundK1, counter: .init(offset: 0), nonce: nonce)
@@ -126,7 +125,6 @@ final class ChaCha20Poly1305TransportProtection: NIOSSHTransportProtection, _NIO
         let payloadPT = try Insecure.ChaCha20CTR.encrypt(
             payloadCT, using: inboundK2, counter: .init(offset: 1), nonce: nonce)
 
-        self.inboundSequenceNumber = sequenceNumber &+ 1  // lockstep for the next decryptFirstBlock
         var plaintext = Data(payloadPT)
         try plaintext.removePaddingBytesChaCha()  // strip padding-length byte + padding
         source.clear()
@@ -147,9 +145,15 @@ final class ChaCha20Poly1305TransportProtection: NIOSSHTransportProtection, _NIO
         var mac = Poly1305(key: try polyKey(outboundK2, nonce))
         mac.update(lenCT + payloadCT)
         let tag = mac.finalize()
-        destination.clear()
-        destination.writeBytes(lenCT)
-        destination.writeBytes(payloadCT)
+        // Overwrite the plaintext readable region IN PLACE with the equal-length ciphertext, then
+        // append the tag. We must NOT clear()/rewrite from index 0: the serializer hands us a buffer
+        // whose readable region is just this packet but which may hold earlier, not-yet-flushed
+        // bytes before the reader index. clear() would discard those and desync the framing.
+        let writeIndex = destination.readerIndex
+        destination.setBytes(lenCT, at: writeIndex)
+        destination.setBytes(payloadCT, at: writeIndex + lenCT.count)
+        // writerIndex sits at the end of the readable region; append the tag there.
+        destination.moveWriterIndex(to: writeIndex + lenCT.count + payloadCT.count)
         destination.writeBytes(tag)
     }
 }

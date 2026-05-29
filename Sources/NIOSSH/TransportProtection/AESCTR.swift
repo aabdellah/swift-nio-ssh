@@ -124,7 +124,7 @@ extension AESCTRTransportProtection: NIOSSHTransportProtection {
             : HMAC<SHA256>.isValidAuthenticationCode(tag, authenticating: bytes, using: key)
     }
 
-    func decryptFirstBlock(_ source: inout ByteBuffer) throws {
+    func decryptFirstBlock(_ source: inout ByteBuffer, sequenceNumber _: UInt32) throws {
         // ETM: length is cleartext -> no-op (like GCM). E&M: CTR-decrypt the first 16 bytes against
         // a COPY of the running inbound counter to reveal the 4-byte length WITHOUT advancing the
         // persistent counter (the same bytes are decrypted again in decryptAndVerifyRemainingPacket,
@@ -184,18 +184,24 @@ extension AESCTRTransportProtection: NIOSSHTransportProtection {
     func encryptPacket(_ destination: inout ByteBuffer, sequenceNumber: UInt32) throws {
         let seq = Self.seqBytes(sequenceNumber)
         let all = Array(destination.readableBytesView)  // length(4)‖padlen‖payload‖padding
-        destination.clear()
+        // Overwrite the plaintext readable region IN PLACE with the equal-length ciphertext, then
+        // append the tag. We must NOT clear()/rewrite from index 0: the serializer hands us a buffer
+        // whose readable region is just this packet but which may hold earlier, not-yet-flushed
+        // bytes before the reader index. clear() would discard those and desync the framing.
+        let writeIndex = destination.readerIndex
         if Self.isETM {
             let length = Array(all.prefix(4))
             let ct = try self.ctr(Array(all.dropFirst(4)), key: self.outboundKey, counter: &self.outboundCounter)
             let tag = self.hmac(seq + length + ct, key: self.outboundMACKey)
-            destination.writeBytes(length)
-            destination.writeBytes(ct)
+            destination.setBytes(length, at: writeIndex)
+            destination.setBytes(ct, at: writeIndex + length.count)
+            destination.moveWriterIndex(to: writeIndex + length.count + ct.count)
             destination.writeBytes(tag)
         } else {
             let tag = self.hmac(seq + all, key: self.outboundMACKey)  // MAC over plaintext, incl. length
             let ct = try self.ctr(all, key: self.outboundKey, counter: &self.outboundCounter)
-            destination.writeBytes(ct)
+            destination.setBytes(ct, at: writeIndex)
+            destination.moveWriterIndex(to: writeIndex + ct.count)
             destination.writeBytes(tag)
         }
     }

@@ -168,7 +168,7 @@ final class AESCTRTests: XCTestCase {
         try enc.encryptPacket(&wire, sequenceNumber: seq)
 
         // Decrypt: peer reveals length, then verifies + decrypts the remainder.
-        try dec.decryptFirstBlock(&wire)
+        try dec.decryptFirstBlock(&wire, sequenceNumber: seq)
         let body = try dec.decryptAndVerifyRemainingPacket(&wire, sequenceNumber: seq)
         return Array(body.readableBytesView)
     }
@@ -239,7 +239,7 @@ final class AESCTRTests: XCTestCase {
             var b = wire.getInteger(at: last, as: UInt8.self)!
             b ^= 0xff
             wire.setInteger(b, at: last)
-            try dec.decryptFirstBlock(&wire)
+            try dec.decryptFirstBlock(&wire, sequenceNumber: 0)
             XCTAssertThrowsError(try dec.decryptAndVerifyRemainingPacket(&wire, sequenceNumber: 0), "tampered tag", file: file, line: line) {
                 XCTAssertEqual(($0 as? NIOSSHError)?.type, .invalidMACTag, file: file, line: line)
             }
@@ -258,7 +258,7 @@ final class AESCTRTests: XCTestCase {
             var b = wire.getInteger(at: idx, as: UInt8.self)!
             b ^= 0xff
             wire.setInteger(b, at: idx)
-            try dec.decryptFirstBlock(&wire)
+            try dec.decryptFirstBlock(&wire, sequenceNumber: 0)
             XCTAssertThrowsError(try dec.decryptAndVerifyRemainingPacket(&wire, sequenceNumber: 0), "tampered ciphertext", file: file, line: line) {
                 XCTAssertEqual(($0 as? NIOSSHError)?.type, .invalidMACTag, file: file, line: line)
             }
@@ -276,7 +276,7 @@ final class AESCTRTests: XCTestCase {
             var b = wire.getInteger(at: idx, as: UInt8.self)!
             b ^= 0x01
             wire.setInteger(b, at: idx)
-            try dec.decryptFirstBlock(&wire)
+            try dec.decryptFirstBlock(&wire, sequenceNumber: 0)
             XCTAssertThrowsError(try dec.decryptAndVerifyRemainingPacket(&wire, sequenceNumber: 0), "tampered ETM length", file: file, line: line) {
                 XCTAssertEqual(($0 as? NIOSSHError)?.type, .invalidMACTag, file: file, line: line)
             }
