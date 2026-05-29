@@ -63,6 +63,15 @@ public final class NIOSSHHandler {
 
     private var pendingGlobalRequestResponses: CircularBuffer<PendingGlobalRequestResponse?>
 
+    /// Drives automatic client-initiated rekeying when a `RekeyLimit` is configured.
+    /// `nil` (the default) means no automatic rekey.
+    private var rekeyController: RekeyController?
+
+    /// Test-only observable: the number of client-initiated rekeys this handler has
+    /// begun (via `initiateRekey`). Used by the hermetic rekey-trigger tests to assert
+    /// that a threshold actually fired without sniffing the encrypted KEX_INIT.
+    internal private(set) var rekeyInitiationCount: Int = 0
+
     /// Construct a new ``NIOSSHHandler``.
     ///
     /// - parameters:
@@ -85,6 +94,9 @@ public final class NIOSSHHandler {
             allocator: allocator,
             childChannelInitializer: inboundChildChannelInitializer
         )
+        if let limit = role.rekeyLimit {
+            self.rekeyController = RekeyController(limit: limit)
+        }
     }
 }
 
@@ -132,6 +144,9 @@ extension NIOSSHHandler: ChannelDuplexHandler {
     public func handlerRemoved(context: ChannelHandlerContext) {
         self.context = nil
 
+        self.rekeyController?.scheduled?.cancel()
+        self.rekeyController?.scheduled = nil
+
         // We don't actually need to nil out the multiplexer here (it will nil its reference to us)
         // but we _can_, and it doesn't hurt.
         self.multiplexer?.parentHandlerRemoved()
@@ -163,6 +178,8 @@ extension NIOSSHHandler: ChannelDuplexHandler {
     }
 
     public func channelInactive(context: ChannelHandlerContext) {
+        self.rekeyController?.scheduled?.cancel()
+        self.rekeyController?.scheduled = nil
         self.multiplexer?.parentChannelInactive()
     }
 
@@ -170,6 +187,7 @@ extension NIOSSHHandler: ChannelDuplexHandler {
         self.expectingChannelReadComplete = true
 
         var data = self.unwrapInboundIn(data)
+        let inboundByteCount = data.readableBytes
         self.stateMachine.bufferInboundData(&data)
 
         do {
@@ -182,6 +200,8 @@ extension NIOSSHHandler: ChannelDuplexHandler {
         } catch {
             context.fireErrorCaught(error)
         }
+
+        self.considerRekey(transferredBytes: inboundByteCount, context: context)
     }
 
     public func channelReadComplete(context: ChannelHandlerContext) {
@@ -215,6 +235,7 @@ extension NIOSSHHandler: ChannelDuplexHandler {
         }
 
         context.write(self.wrapOutboundOut(self.outboundFrameBuffer), promise: promise)
+        self.considerRekey(transferredBytes: self.outboundFrameBuffer.readableBytes, context: context)
     }
 
     private func processInboundMessageResult(
@@ -505,18 +526,66 @@ extension NIOSSHHandler {
 // MARK: Initiate rekeying
 
 extension NIOSSHHandler {
+    /// Accrue transferred bytes; install the time-task lazily on first I/O; rekey if a
+    /// threshold is reached and the connection is currently rekeyable.
+    private func considerRekey(transferredBytes: Int, context: ChannelHandlerContext) {
+        guard self.rekeyController != nil else { return }
+        self.installRekeyTimerIfNeeded(context: context)
+        let crossed = self.rekeyController!.recordBytes(transferredBytes)
+        if crossed, self.stateMachine.canRekey {
+            self.initiateRekey(context: context)
+        }
+    }
+
+    private func installRekeyTimerIfNeeded(context: ChannelHandlerContext) {
+        guard var controller = self.rekeyController,
+            let interval = controller.interval,
+            controller.scheduled == nil
+        else { return }
+        controller.scheduled = context.eventLoop.assumeIsolated().scheduleTask(in: interval) { [weak self] in
+            self?.rekeyTimerFired(context: context)
+        }
+        self.rekeyController = controller
+    }
+
+    private func rekeyTimerFired(context: ChannelHandlerContext) {
+        guard self.rekeyController != nil else { return }
+        self.rekeyController!.scheduled = nil
+        if self.stateMachine.canRekey {
+            self.initiateRekey(context: context)  // resets + reschedules
+        } else {
+            // Not rekeyable yet (handshake/rekey in flight) — try again next interval.
+            self.installRekeyTimerIfNeeded(context: context)
+        }
+    }
+
+    /// Begin a client-initiated rekey and rearm both triggers at initiation.
+    private func initiateRekey(context: ChannelHandlerContext) {
+        var buffer = context.channel.allocator.buffer(capacity: 1024)
+        do {
+            try self.stateMachine.beginRekeying(
+                buffer: &buffer,
+                allocator: context.channel.allocator,
+                loop: context.eventLoop
+            )
+        } catch {
+            context.fireErrorCaught(error)
+            return
+        }
+        self.rekeyInitiationCount &+= 1
+        context.writeAndFlush(self.wrapOutboundOut(buffer), promise: nil)
+        // Rearm: reset the byte counter and reschedule the timer from "now".
+        self.rekeyController?.reset()
+        self.rekeyController?.scheduled?.cancel()
+        self.rekeyController?.scheduled = nil
+        self.installRekeyTimerIfNeeded(context: context)
+    }
+
     // This function mostly exists for testing purposes: we don't initiate re-keying today because it's not
     // well-supported by evidence. But we want to be able to test against implementations who do, so we have support for
     // kicking it off.
     internal func _rekey() throws {
-        // As this is test-only there are a bunch of preconditions in here, we don't really mind if we hit them in testing.
-        var buffer = self.context!.channel.allocator.buffer(capacity: 1024)
-        try self.stateMachine.beginRekeying(
-            buffer: &buffer,
-            allocator: self.context!.channel.allocator,
-            loop: self.context!.eventLoop
-        )
-        self.context!.writeAndFlush(self.wrapOutboundOut(buffer), promise: nil)
+        self.initiateRekey(context: self.context!)
     }
 }
 

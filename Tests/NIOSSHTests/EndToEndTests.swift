@@ -82,14 +82,14 @@ class BackToBackEmbeddedChannel {
     }
 
     func configureWithHarness(_ harness: TestHarness) throws {
+        var clientConfig = SSHClientConfiguration(
+            userAuthDelegate: harness.clientAuthDelegate,
+            serverAuthDelegate: harness.clientServerAuthDelegate,
+            globalRequestDelegate: harness.clientGlobalRequestDelegate
+        )
+        clientConfig.rekeyLimit = harness.clientRekeyLimit
         let clientHandler = NIOSSHHandler(
-            role: .client(
-                .init(
-                    userAuthDelegate: harness.clientAuthDelegate,
-                    serverAuthDelegate: harness.clientServerAuthDelegate,
-                    globalRequestDelegate: harness.clientGlobalRequestDelegate
-                )
-            ),
+            role: .client(clientConfig),
             allocator: self.client.allocator,
             inboundChildChannelInitializer: nil
         )
@@ -153,6 +153,8 @@ struct TestHarness {
     var serverHostKeys: [NIOSSHPrivateKey] = [.init(ed25519Key: .init())]
 
     var serverAuthBanner: SSHServerConfiguration.UserAuthBanner?
+
+    var clientRekeyLimit: SSHClientConfiguration.RekeyLimit?
 }
 
 final class UserEventExpecter: ChannelInboundHandler {
@@ -163,6 +165,24 @@ final class UserEventExpecter: ChannelInboundHandler {
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         self.userEvents.append(event)
         context.fireUserInboundEventTriggered(event)
+    }
+}
+
+/// Accumulates the plaintext payload of every `.channel`-type `SSHChannelData` read on
+/// a child channel, in order. Used by the cross-rekey data-flow test to prove all bytes
+/// arrive intact across a mid-stream rekey.
+final class ChannelDataAccumulator: ChannelInboundHandler {
+    typealias InboundIn = SSHChannelData
+    typealias InboundOut = SSHChannelData
+
+    private(set) var received = ByteBuffer()
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let channelData = self.unwrapInboundIn(data)
+        if case .channel = channelData.type, case .byteBuffer(var buffer) = channelData.data {
+            self.received.writeBuffer(&buffer)
+        }
+        context.fireChannelRead(data)
     }
 }
 
@@ -535,6 +555,98 @@ class EndToEndTests: XCTestCase {
         self.channel.clientSSHHandler?.createChannel(nil, nil)
         XCTAssertNoThrow(try self.channel.interactInMemory())
         XCTAssertEqual(self.channel.activeServerChannels.count, 1)
+    }
+
+    func testDataThresholdTriggersRekey() throws {
+        var harness = TestHarness()
+        harness.clientRekeyLimit = .init(dataBytes: 16384, interval: nil)
+        XCTAssertNoThrow(try self.channel.configureWithHarness(harness))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        // Open a child channel.
+        let clientChannel = try self.channel.createNewChannel()
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        // Snapshot the rekey count after the handshake + channel-open settle, so the
+        // assertion isolates the effect of the data push regardless of handshake volume.
+        let baseline = self.channel.clientSSHHandler!.rekeyInitiationCount
+
+        // Push more than dataBytes of channel data from the client.
+        var payload = clientChannel.allocator.buffer(capacity: 65536)
+        payload.writeBytes(Array(repeating: UInt8(0x61), count: 65536))
+        clientChannel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(payload)), promise: nil)
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        // A rekey must have been initiated by the byte threshold.
+        XCTAssertGreaterThan(self.channel.clientSSHHandler!.rekeyInitiationCount, baseline)
+
+        // And the session still works: a second channel opens fine.
+        XCTAssertEqual(self.channel.activeServerChannels.count, 1)
+        self.channel.clientSSHHandler?.createChannel(nil, nil)
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+        XCTAssertEqual(self.channel.activeServerChannels.count, 2)
+    }
+
+    func testTimeThresholdTriggersRekey() throws {
+        var harness = TestHarness()
+        harness.clientRekeyLimit = .init(dataBytes: nil, interval: .seconds(10))
+        XCTAssertNoThrow(try self.channel.configureWithHarness(harness))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        // The handshake I/O installs the time-task. No rekey yet.
+        let baseline = self.channel.clientSSHHandler!.rekeyInitiationCount
+
+        // Fire the timer deterministically.
+        self.channel.advanceTime(by: .seconds(10))
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        XCTAssertGreaterThan(self.channel.clientSSHHandler!.rekeyInitiationCount, baseline)
+
+        // Session still works after the time-triggered rekey.
+        self.channel.clientSSHHandler?.createChannel(nil, nil)
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+        XCTAssertEqual(self.channel.activeServerChannels.count, 1)
+    }
+
+    func testNilRekeyLimitNeverRekeys() throws {
+        // Default harness => rekeyLimit nil.
+        XCTAssertNoThrow(try self.channel.configureWithHarness(TestHarness()))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        let clientChannel = try self.channel.createNewChannel()
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        // Push lots of data and advance the clock; nothing should rekey.
+        var payload = clientChannel.allocator.buffer(capacity: 131072)
+        payload.writeBytes(Array(repeating: UInt8(0x62), count: 131072))
+        clientChannel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(payload)), promise: nil)
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+        self.channel.advanceTime(by: .hours(1))
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        XCTAssertEqual(self.channel.clientSSHHandler!.rekeyInitiationCount, 0)
+    }
+
+    func testRekeyTimerCancelledOnHandlerRemoved() throws {
+        var harness = TestHarness()
+        harness.clientRekeyLimit = .init(dataBytes: nil, interval: .seconds(10))
+        XCTAssertNoThrow(try self.channel.configureWithHarness(harness))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        // Close the client channel: channelInactive + handlerRemoved must cancel the
+        // scheduled time-task.
+        let handler = self.channel.clientSSHHandler!
+        let baseline = handler.rekeyInitiationCount
+        XCTAssertNoThrow(try self.channel.client.close().wait())
+
+        // Advancing time must NOT fire the cancelled task (no rekey, no crash).
+        self.channel.advanceTime(by: .seconds(10))
+        self.channel.run()
+        XCTAssertEqual(handler.rekeyInitiationCount, baseline)
     }
 
     func testDelayedHostKeyValidation() throws {
