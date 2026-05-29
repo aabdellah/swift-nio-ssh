@@ -667,9 +667,16 @@ extension SSHKeyExchangeStateMachine {
         $0.keyExchangeAlgorithmNames
     }
 
-    /// All known host key algorithms.
+    /// All known host key algorithms, in OpenSSH preference order.
+    ///
+    /// RSA SHA-2 variants are appended after the ed25519/ECDSA entries (`rsa-sha2-512`
+    /// before `rsa-sha2-256`, matching OpenSSH preference). `ssh-rsa` (RFC 8332 legacy
+    /// SHA-1) is deliberately EXCLUDED from the default set — modern OpenSSH disables it
+    /// by default and it is reachable only via an explicit
+    /// `SSHClientConfiguration.preferredHostKeyAlgorithms` opt-in.
     static let supportedServerHostKeyAlgorithms: [Substring] = [
         "ssh-ed25519", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp521",
+        "rsa-sha2-512", "rsa-sha2-256",
     ]
 
     /// Strict KEX extension names (Terrapin CVE-2023-48795 mitigation).

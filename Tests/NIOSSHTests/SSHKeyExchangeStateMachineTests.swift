@@ -16,6 +16,7 @@ import Crypto
 import NIOCore
 import NIOEmbedded
 import XCTest
+import _CryptoExtras
 
 @testable import NIOSSH
 
@@ -566,6 +567,98 @@ final class SSHKeyExchangeStateMachineTests: XCTestCase {
 
     func testKeyExchangeUsingP521HostKeysOnly() throws {
         try self.straightforwardCustomHostKeyHandshake(hostKey: .init(p521Key: .init()))
+    }
+
+    func testKeyExchangeUsingRSASHA512HostKeysOnly() throws {
+        // Server presents an rsa-sha2-512 host key; a default client must negotiate AND
+        // verify it. Hermetic round-trip (self-consistency only — the interop + golden-vector
+        // gates are what prove OpenSSH byte-compatibility; see plan Tasks 6-7, C1 lesson).
+        try self.straightforwardCustomHostKeyHandshake(
+            hostKey: .init(rsaSHA512Key: _RSA.Signing.PrivateKey(keySize: .bits2048))
+        )
+    }
+
+    func testKeyExchangeUsingRSASHA256HostKeysOnly() throws {
+        try self.straightforwardCustomHostKeyHandshake(
+            hostKey: .init(rsaSHA256Key: _RSA.Signing.PrivateKey(keySize: .bits2048))
+        )
+    }
+
+    func testRSASHA512KeyBlobAcceptedAndVerified() throws {
+        // Regression for the cross-tag defect: a server signs with rsa-sha2-512 but the wire
+        // key blob is `ssh-rsa` (parsed as .rsaSHA256). On HEAD (with RSA in the default list
+        // but no guard/verify fix) this throws .invalidHostKeyForKeyExchange at the dual-accept
+        // guard; before the list change it fails negotiation. Pins the full guard+verify path.
+        let allocator = ByteBufferAllocator()
+        let loop = EmbeddedEventLoop()
+        let serverHostKey = NIOSSHPrivateKey(rsaSHA512Key: try _RSA.Signing.PrivateKey(keySize: .bits2048))
+
+        var client = SSHKeyExchangeStateMachine(
+            allocator: allocator,
+            loop: loop,
+            role: .client(
+                .init(userAuthDelegate: ExplodingAuthDelegate(), serverAuthDelegate: AcceptAllHostKeysDelegate())
+            ),
+            remoteVersion: Constants.version,
+            protectionSchemes: [AES256GCMOpenSSHTransportProtection.self],
+            previousSessionIdentifier: nil
+        )
+        var server = SSHKeyExchangeStateMachine(
+            allocator: allocator,
+            loop: loop,
+            role: .server(.init(hostKeys: [serverHostKey], userAuthDelegate: DenyAllServerAuthDelegate())),
+            remoteVersion: Constants.version,
+            protectionSchemes: [AES256GCMOpenSSHTransportProtection.self],
+            previousSessionIdentifier: nil
+        )
+
+        let serverMessage = server.createKeyExchangeMessage()
+        let clientMessage = client.createKeyExchangeMessage()
+        server.send(keyExchange: serverMessage)
+        client.send(keyExchange: clientMessage)
+        try self.assertGeneratesNoMessage(server.handle(keyExchange: clientMessage))
+        let ecdhInit = try assertGeneratesECDHKeyExchangeInit(client.handle(keyExchange: serverMessage))
+        client.send(keyExchangeInit: ecdhInit)
+        let ecdhReply = try assertGeneratesECDHKeyExchangeReplyAndNewKeys(server.handle(keyExchangeInit: ecdhInit))
+
+        // The negotiated host-key algorithm must be rsa-sha2-512 (512 before 256 in the list).
+        XCTAssertEqual(server._testOnly_negotiatedHostKeyAlgorithm, "rsa-sha2-512")
+        XCTAssertEqual(client._testOnly_negotiatedHostKeyAlgorithm, "rsa-sha2-512")
+
+        XCTAssertNoThrow(try server.send(keyExchangeReply: ecdhReply))
+        _ = server.sendNewKeys()
+
+        // CRITICAL (C1 lesson): round-trip the reply through the wire codec before the client
+        // handles it. On the wire the host key is an `ssh-rsa` blob, so `readSSHHostKey` tags
+        // the parsed key as `.rsaSHA256` regardless of the negotiated `rsa-sha2-512`. This
+        // reproduces the real-wire cross-tag the in-memory `.rsaSHA512` key would NOT, and so
+        // exercises the dual-accept guard fix AND the verify-side cross-tag fix — not just the
+        // sign/verify SHA-symmetry.
+        var wire = allocator.buffer(capacity: 1024)
+        wire.writeKeyExchangeECDHReplyMessage(ecdhReply)
+        let wireReply = try XCTUnwrap(try wire.readKeyExchangeECDHReplyMessage())
+        // The parsed host key carries the ssh-rsa wire prefix and is tagged .rsaSHA256.
+        XCTAssertTrue(wireReply.hostKey.keyPrefix.elementsEqual("ssh-rsa".utf8))
+        XCTAssertTrue(wireReply.hostKey.signatureAlgorithm.elementsEqual("rsa-sha2-256".utf8))
+
+        // Client dual-accept guard (ssh-rsa blob vs negotiated rsa-sha2-512) + verify cross-tag
+        // (key tagged .rsaSHA256, signature tagged .rsaSHA512) must accept.
+        try self.assertGeneratesNewKeysSynchronously(client.handle(keyExchangeReply: wireReply))
+    }
+
+    func testRSAHostKeyDefaultOrdering() {
+        let list = SSHKeyExchangeStateMachine.supportedServerHostKeyAlgorithms
+        // ed25519/ecdsa stay first; RSA appended; 512 before 256; ssh-rsa absent.
+        XCTAssertEqual(list.first, "ssh-ed25519")  // unchanged → expectingIncorrectGuess unaffected
+        XCTAssertFalse(list.contains("ssh-rsa"))
+        let i512 = list.firstIndex(of: "rsa-sha2-512")
+        let i256 = list.firstIndex(of: "rsa-sha2-256")
+        XCTAssertNotNil(i512)
+        XCTAssertNotNil(i256)
+        XCTAssertLessThan(i512!, i256!)
+        // RSA must be after all ecdsa entries.
+        let lastEcdsa = list.lastIndex(where: { $0.hasPrefix("ecdsa-") })!
+        XCTAssertLessThan(lastEcdsa, i512!)
     }
 
     private func straightforwardCustomHostKeyHandshake(hostKey: NIOSSHPrivateKey) throws {
