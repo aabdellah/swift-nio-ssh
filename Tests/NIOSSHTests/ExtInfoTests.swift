@@ -43,6 +43,31 @@ final class ExtInfoTests: XCTestCase {
         XCTAssertThrowsError(try buffer.readSSHMessage())
     }
 
+    /// Byte-at-a-time partial read: every prefix shorter than the whole message
+    /// must parse to nil and rewind the reader; the complete message round-trips.
+    /// Mirrors SSHMessagesTests.assertCorrectlyManagesPartialRead (spec §7/§9).
+    private func assertCorrectlyManagesPartialRead(_ message: SSHMessage) throws {
+        var buffer = ByteBufferAllocator().buffer(capacity: 1024)
+        buffer.writeSSHMessage(message)
+        let messageBytes = Array(buffer.readableBytesView)
+        buffer.clear()
+        for byte in messageBytes.dropLast() {
+            buffer.writeInteger(byte)
+            XCTAssertNil(try buffer.readSSHMessage())
+        }
+        if let last = messageBytes.last {
+            buffer.writeInteger(last)
+        }
+        XCTAssertEqual(try buffer.readSSHMessage(), message)
+    }
+
+    func testExtInfoPartialRead() throws {
+        try self.assertCorrectlyManagesPartialRead(
+            .extInfo(.init(extensions: [
+                .init(name: "server-sig-algs", value: "rsa-sha2-512,rsa-sha2-256"),
+            ])))
+    }
+
     func testRSAVariantSelection() {
         // server prefers 512 → upgrade
         XCTAssertEqual(
