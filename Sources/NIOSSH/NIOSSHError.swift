@@ -57,6 +57,8 @@ extension NIOSSHError {
 
     internal static let invalidKeySize = NIOSSHError(type: .invalidKeySize, diagnostics: nil)
 
+    internal static let invalidMACTag = NIOSSHError(type: .invalidMACTag, diagnostics: nil)
+
     internal static let insufficientPadding = NIOSSHError(type: .insufficientPadding, diagnostics: nil)
 
     internal static let excessPadding = NIOSSHError(type: .excessPadding, diagnostics: nil)
@@ -183,6 +185,7 @@ extension NIOSSHError {
             case invalidEncryptedPacketLength
             case invalidDecryptedPlaintextLength
             case invalidKeySize
+            case invalidMACTag
             case insufficientPadding
             case excessPadding
             case unknownPublicKey
@@ -232,6 +235,9 @@ extension NIOSSHError {
 
         /// The generated key size was invalid for the given encryption scheme.
         public static let invalidKeySize: ErrorType = .init(.invalidKeySize)
+
+        /// A packet failed MAC/authentication-tag verification (non-AEAD HMAC or Poly1305 tag mismatch).
+        public static let invalidMACTag: ErrorType = .init(.invalidMACTag)
 
         /// A packet was decrypted that had insufficient padding.
         public static let insufficientPadding: ErrorType = .init(.insufficientPadding)
