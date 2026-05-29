@@ -145,6 +145,10 @@ struct SSHKeyExchangeStateMachine {
                 if config.enableStrictKeyExchange {
                     kexAlgorithms.append(Self.strictKexClientExtension)
                 }
+                // RFC 8308: advertise willingness to receive SSH_MSG_EXT_INFO.
+                // Marker only — never a selectable KEX algorithm. Initial KEX only
+                // (a rekey must NOT re-advertise).
+                kexAlgorithms.append("ext-info-c")
             case .server(let config):
                 if config.enableStrictKeyExchange {
                     kexAlgorithms.append(Self.strictKexServerExtension)

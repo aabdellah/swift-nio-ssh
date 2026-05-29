@@ -404,6 +404,29 @@ final class SSHKeyExchangeStateMachineTests: XCTestCase {
         self.assertCompatibleProtection(client: clientInboundProtection, server: serverInboundProtection)
     }
 
+    func testClientAdvertisesExtInfoCInInitialKex() throws {
+        let allocator = ByteBufferAllocator()
+        let loop = EmbeddedEventLoop()
+
+        let client = SSHKeyExchangeStateMachine(
+            allocator: allocator,
+            loop: loop,
+            role: .client(
+                .init(userAuthDelegate: ExplodingAuthDelegate(), serverAuthDelegate: AcceptAllHostKeysDelegate())
+            ),
+            remoteVersion: Constants.version,
+            protectionSchemes: [AES256GCMOpenSSHTransportProtection.self],
+            previousSessionIdentifier: nil
+        )
+        let message = client.createKeyExchangeMessage()
+        XCTAssertTrue(
+            message.keyExchangeAlgorithms.contains("ext-info-c"),
+            "client must advertise ext-info-c in initial KEXINIT"
+        )
+        // ext-info-c must be a trailing marker, not a real KEX algorithm
+        XCTAssertFalse(SSHKeyExchangeStateMachine.supportedKeyExchangeAlgorithms.contains("ext-info-c"))
+    }
+
     func testKeyExchangeWithInvalidGuess() throws {
         // This test verifies that the server will tolerate an invalid guessed negotiation. For this reason we only drive a server,
         // as our code never actually guesses.
