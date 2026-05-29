@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 import Crypto
+import _CryptoExtras
 import NIOCore
 import NIOFoundationCompat
 import XCTest
@@ -253,12 +254,25 @@ final class HostKeyTests: XCTestCase {
     }
 
     func testUnrecognisedKey() throws {
+        // A genuinely unknown algorithm id must still be rejected. `ssh-rsa` is now a
+        // RECOGNISED host-key type (C3), so use `ssh-dss` (DSA, unsupported) which routes
+        // through readCertifiedKeyWithoutKeyPrefix → baseKeyPrefixForKeyPrefix → throws.
         var buffer = ByteBufferAllocator().buffer(capacity: 1024)
-        buffer.writeSSHString("ssh-rsa".utf8)
+        buffer.writeSSHString("ssh-dss".utf8)
 
         XCTAssertThrowsError(try buffer.readSSHHostKey()) { error in
             XCTAssertEqual((error as? NIOSSHError).map { $0.type }, .unknownPublicKey)
         }
+    }
+
+    func testRSAHostKeyIsRecognised() throws {
+        // ssh-rsa is now a RECOGNISED host-key type (C3). A full ssh-rsa blob round-trips
+        // through write/read and reads back as the same recognised RSA public key.
+        let rsa = NIOSSHPrivateKey(rsaSHA256Key: try _RSA.Signing.PrivateKey(keySize: .bits2048))
+        var buffer = ByteBufferAllocator().buffer(capacity: 1024)
+        buffer.writeSSHHostKey(rsa.publicKey)
+        let parsed = try XCTUnwrap(try buffer.readSSHHostKey())
+        XCTAssertEqual(parsed, rsa.publicKey)
     }
 
     func testInvalidDomainParametersForECDSAP256() throws {
