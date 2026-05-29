@@ -362,4 +362,87 @@ final class AESCTRTests: XCTestCase {
             XCTAssertEqual(($0 as? NIOSSHError)?.type, .invalidNonceLength)
         }
     }
+
+    // MARK: - Parser lockstep (Task T7)
+    //
+    // Drive serializer-produced wire bytes through SSHPacketParser for an ETM scheme (length is
+    // cleartext, MAC over seqnr‖length‖ciphertext) and an E&M scheme (length encrypted). Both use
+    // the passed-in seqnr in the MAC and a *running* CTR counter that advances per packet; the
+    // serializer↔parser pair must keep both the seqnr and the counter aligned across whole AND
+    // split (partial-delivery) packets, otherwise the HMAC fails.
+
+    /// Feed the SSH version line so the parser reaches `cleartextWaitingForLength` (seqnr 0).
+    private func feedVersion(to parser: inout SSHPacketParser) throws {
+        var version = ByteBufferAllocator().buffer(string: "SSH-2.0-OpenSSH_TEST\r\n")
+        parser.append(bytes: &version)
+        guard case .some(.version) = try parser.nextPacket() else {
+            return XCTFail("expected .version")
+        }
+        XCTAssertEqual(parser.sequenceNumber, 0)
+    }
+
+    /// Build a serializer (encrypts with `keys.outbound`) + parser (decrypts with the crossed keys,
+    /// so its inbound == the serializer's outbound) for the given scheme, both at seqnr 0.
+    private func makeParserPair<P: AESCTRTransportProtection>(_ type: P.Type) throws
+        -> (SSHPacketSerializer, SSHPacketParser)
+    {
+        let keys = makeKeys(for: type)
+        var serializer = SSHPacketSerializer()
+        var version = ByteBufferAllocator().buffer(capacity: 64)
+        try serializer.serialize(message: .version("SSH-2.0-OpenSSH_TEST"), to: &version)
+        serializer.addEncryption(try P(initialKeys: keys))
+
+        var parser = SSHPacketParser(isServer: true, allocator: ByteBufferAllocator())
+        try feedVersion(to: &parser)
+        parser.addEncryption(try P(initialKeys: crossedKeys(keys)))
+        return (serializer, parser)
+    }
+
+    private func runParserLockstep<P: AESCTRTransportProtection>(
+        _ type: P.Type,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        var (serializer, parser) = try makeParserPair(type)
+
+        // Packet 0 (whole).
+        var w0 = ByteBufferAllocator().buffer(capacity: 256)
+        try serializer.serialize(message: .newKeys, to: &w0)
+        parser.append(bytes: &w0)
+        guard case .some(.newKeys) = try parser.nextPacket() else {
+            return XCTFail("packet 0 failed to decode", file: file, line: line)
+        }
+        XCTAssertEqual(parser.sequenceNumber, 1, file: file, line: line)
+
+        // Packet 1, split: deliver the first cipher block, then the remainder. The CTR counter and
+        // the seqnr must not advance until the full packet verifies.
+        var w1 = ByteBufferAllocator().buffer(capacity: 256)
+        try serializer.serialize(message: .newKeys, to: &w1)
+        var head = w1.readSlice(length: P.cipherBlockSize)!  // 16 bytes — fires decryptFirstBlock
+        parser.append(bytes: &head)
+        XCTAssertNil(try parser.nextPacket(), "incomplete packet must yield nil", file: file, line: line)
+        XCTAssertEqual(parser.sequenceNumber, 1, "seqnr must not advance on a partial packet", file: file, line: line)
+        parser.append(bytes: &w1)
+        guard case .some(.newKeys) = try parser.nextPacket() else {
+            return XCTFail("split packet 1 failed to decode (counter/seqnr drift)", file: file, line: line)
+        }
+        XCTAssertEqual(parser.sequenceNumber, 2, file: file, line: line)
+
+        // Packet 2 (whole) — confirms post-split alignment.
+        var w2 = ByteBufferAllocator().buffer(capacity: 256)
+        try serializer.serialize(message: .newKeys, to: &w2)
+        parser.append(bytes: &w2)
+        guard case .some(.newKeys) = try parser.nextPacket() else {
+            return XCTFail("packet 2 failed to decode", file: file, line: line)
+        }
+        XCTAssertEqual(parser.sequenceNumber, 3, file: file, line: line)
+    }
+
+    func testParserLockstepETM() throws {
+        try runParserLockstep(AES128CTR_HMACSHA256ETM.self)  // length cleartext
+    }
+
+    func testParserLockstepEandM() throws {
+        try runParserLockstep(AES256CTR_HMACSHA512.self)  // length encrypted
+    }
 }

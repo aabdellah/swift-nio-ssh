@@ -71,6 +71,12 @@ public protocol NIOSSHTransportProtection: AnyObject {
     /// A rekey has occurred and the encryption keys need to be changed.
     func updateKeys(_ newKeys: NIOSSHSessionKeys) throws
 
+    /// Note: ETM schemes express `lengthEncrypted == false` and implement `decryptFirstBlock`
+    /// as a no-op (the length is cleartext). The chacha20-poly1305@openssh.com scheme decrypts
+    /// the length field in `decryptFirstBlock` but treats it as *provisional* (authenticated
+    /// later in `decryptAndVerifyRemainingPacket`); the parser bounds `length + macBytes` against
+    /// the max-packet guard before the Poly1305 check.
+    ///
     /// Given the first cipher block size, decrypt the length field.
     ///
     /// This function will be called whenever `source` has at least `cipherBlockSize` bytes

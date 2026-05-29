@@ -306,4 +306,94 @@ final class ChaCha20Poly1305Tests: XCTestCase {
         XCTAssertEqual(ChaCha20Poly1305TransportProtection.cipherBlockSize, 8)
         XCTAssertEqual(ChaCha20Poly1305TransportProtection.keySizes.encryptionKeySize, 64)
     }
+
+    // ----- Parser lockstep (Task T7) -----
+    //
+    // These tests drive serializer-produced wire bytes through SSHPacketParser to prove the
+    // chacha scheme's internal `inboundSequenceNumber` mirror (used by decryptFirstBlock, which
+    // receives no seqnr argument) stays in lockstep with SSHPacketParser.sequenceNumber (which
+    // feeds decryptAndVerifyRemainingPacket). chacha's nonce is *derived* from the seqnr, so any
+    // drift produces a wrong keystream and a Poly1305 failure — the test cannot pass on drift.
+
+    /// Feed the SSH version line so the parser reaches `cleartextWaitingForLength` (seqnr 0).
+    private func feedVersion(to parser: inout SSHPacketParser) throws {
+        var version = ByteBufferAllocator().buffer(string: "SSH-2.0-OpenSSH_TEST\r\n")
+        parser.append(bytes: &version)
+        guard case .some(.version) = try parser.nextPacket() else {
+            return XCTFail("expected .version")
+        }
+        XCTAssertEqual(parser.sequenceNumber, 0)
+    }
+
+    /// Build a serializer/parser pair that share a key (serializer.outbound == parser.inbound),
+    /// both advanced to the encrypted state at sequence number 0.
+    private func makeParserPair() throws -> (SSHPacketSerializer, SSHPacketParser) {
+        let keys = TestKeys.chacha(key64: GoldenVectors.chachaKey64)
+        var serializer = SSHPacketSerializer()
+        var version = ByteBufferAllocator().buffer(capacity: 64)
+        try serializer.serialize(message: .version("SSH-2.0-OpenSSH_TEST"), to: &version)
+        serializer.addEncryption(try ChaCha20Poly1305TransportProtection(initialKeys: keys))
+
+        var parser = SSHPacketParser(isServer: true, allocator: ByteBufferAllocator())
+        try feedVersion(to: &parser)
+        parser.addEncryption(try ChaCha20Poly1305TransportProtection(initialKeys: keys))
+        return (serializer, parser)
+    }
+
+    func testParserMultiPacketRoundTrip() throws {
+        var (serializer, parser) = try makeParserPair()
+
+        // Five sequential packets straight through the parser. Both sides start at seqnr 0; the
+        // chacha mirror must advance exactly with parser.sequenceNumber for every nonce to match.
+        for expected in UInt32(0)..<5 {
+            XCTAssertEqual(serializer.sequenceNumber, expected)
+            XCTAssertEqual(parser.sequenceNumber, expected)
+
+            var wire = ByteBufferAllocator().buffer(capacity: 128)
+            try serializer.serialize(message: .newKeys, to: &wire)
+            parser.append(bytes: &wire)
+
+            guard case .some(.newKeys) = try parser.nextPacket() else {
+                return XCTFail("packet \(expected) failed to decode (lockstep drift?)")
+            }
+            XCTAssertEqual(parser.sequenceNumber, expected + 1)
+        }
+    }
+
+    func testParserLockstepAcrossPartialDelivery() throws {
+        // The ONLY path that can desync decryptFirstBlock from decryptAndVerifyRemainingPacket: a
+        // packet that arrives in two TCP segments. decryptFirstBlock runs on the first segment
+        // (revealing the provisional length) WITHOUT advancing parser.sequenceNumber; the body
+        // arrives later and decryptAndVerifyRemainingPacket must use the SAME seqnr. We sandwich a
+        // split packet between whole ones to prove the mirror does not over- or under-advance.
+        var (serializer, parser) = try makeParserPair()
+
+        // Packet 0 (seqnr 0), whole.
+        var w0 = ByteBufferAllocator().buffer(capacity: 128)
+        try serializer.serialize(message: .newKeys, to: &w0)
+        parser.append(bytes: &w0)
+        guard case .some(.newKeys) = try parser.nextPacket() else { return XCTFail("packet 0") }
+        XCTAssertEqual(parser.sequenceNumber, 1)
+
+        // Packet 1 (seqnr 1), delivered as length-block first, then the remainder.
+        var w1 = ByteBufferAllocator().buffer(capacity: 128)
+        try serializer.serialize(message: .newKeys, to: &w1)
+        // chacha cipherBlockSize is 8 -> decryptFirstBlock fires once >= 8 bytes are present.
+        var head = w1.readSlice(length: 8)!
+        parser.append(bytes: &head)
+        XCTAssertNil(try parser.nextPacket(), "incomplete packet must yield nil")
+        XCTAssertEqual(parser.sequenceNumber, 1, "seqnr must NOT advance on a partial packet")
+        parser.append(bytes: &w1)  // remainder
+        guard case .some(.newKeys) = try parser.nextPacket() else {
+            return XCTFail("split packet 1 failed to decode (decryptFirstBlock/verify seqnr drift)")
+        }
+        XCTAssertEqual(parser.sequenceNumber, 2)
+
+        // Packet 2 (seqnr 2), whole — confirms the mirror lands on 2, not 1 or 3, after the split.
+        var w2 = ByteBufferAllocator().buffer(capacity: 128)
+        try serializer.serialize(message: .newKeys, to: &w2)
+        parser.append(bytes: &w2)
+        guard case .some(.newKeys) = try parser.nextPacket() else { return XCTFail("packet 2") }
+        XCTAssertEqual(parser.sequenceNumber, 3)
+    }
 }
