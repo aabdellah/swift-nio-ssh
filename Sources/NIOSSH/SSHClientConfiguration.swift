@@ -53,7 +53,11 @@ public struct SSHClientConfiguration {
     /// advertise at least one algorithm from this list; if there is no overlap the
     /// connection fails with `NIOSSHError.keyExchangeNegotiationFailure`.
     ///
-    /// Pass `nil` (the default) to use the library's built-in algorithm list.
+    /// Pass `nil` (the default) to use the library's built-in algorithm list, which
+    /// is `ssh-ed25519`, the three ECDSA curves, then `rsa-sha2-512` and `rsa-sha2-256`
+    /// (RSA SHA-2 host keys are verified by default). `ssh-rsa` (RFC 8332 legacy SHA-1)
+    /// is NOT in the default set and is reachable only by listing it here explicitly;
+    /// note that `ssh-rsa` signature *verification* is not currently implemented.
     ///
     /// Wire-format names: `"ssh-ed25519"`, `"ecdsa-sha2-nistp256"`,
     /// `"ecdsa-sha2-nistp384"`, `"ecdsa-sha2-nistp521"`,
