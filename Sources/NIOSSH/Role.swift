@@ -46,6 +46,13 @@ public enum SSHConnectionRole {
             return configuration.transportProtectionSchemes
         }
     }
+
+    var rekeyLimit: SSHClientConfiguration.RekeyLimit? {
+        switch self {
+        case .client(let config): return config.rekeyLimit
+        case .server: return nil
+        }
+    }
 }
 
 @available(*, unavailable)

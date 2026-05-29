@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+import NIOCore
+
 /// Configuration for an SSH client.
 public struct SSHClientConfiguration {
     /// The user authentication delegate to be used with this client.
@@ -32,6 +34,20 @@ public struct SSHClientConfiguration {
     /// which resets sequence numbers after SSH_MSG_NEWKEYS to prevent prefix truncation attacks.
     /// Defaults to `true`.
     public var enableStrictKeyExchange: Bool
+
+    /// Automatic rekey thresholds. When `dataBytes` is set, the client rekeys after
+    /// that many transferred bytes since the last rekey; when `interval` is set, it
+    /// rekeys that often. `nil` (the default) disables automatic rekeying.
+    public var rekeyLimit: RekeyLimit?
+
+    public struct RekeyLimit: Sendable, Equatable {
+        public var dataBytes: UInt64?
+        public var interval: TimeAmount?
+        public init(dataBytes: UInt64? = nil, interval: TimeAmount? = nil) {
+            self.dataBytes = dataBytes
+            self.interval = interval
+        }
+    }
 
     public init(
         userAuthDelegate: NIOSSHClientUserAuthenticationDelegate,
@@ -76,6 +92,7 @@ public struct SSHClientConfiguration {
         self.transportProtectionSchemes = transportProtectionSchemes
         self.enableStrictKeyExchange = true
         self.preferredHostKeyAlgorithms = nil
+        self.rekeyLimit = nil
     }
 }
 
