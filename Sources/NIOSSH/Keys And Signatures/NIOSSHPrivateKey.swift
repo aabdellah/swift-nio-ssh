@@ -130,10 +130,17 @@ extension NIOSSHPrivateKey {
             }
             return NIOSSHSignature(backingSignature: .ecdsaP521(signature))
         case .rsaSHA256(let key):
-            let signature = try key.signature(for: digest, padding: .insecurePKCS1v1_5)
+            // RFC 8332 §3: rsa-sha2-256 signs SHA-256 OF the message bytes (here the exchange
+            // hash). The Digest overload of `_RSA.Signing.PrivateKey.signature(for:padding:)`
+            // does NOT rehash — it treats the supplied bytes as the FINAL hash and PKCS#1-pads
+            // with the SHA-256 DigestInfo OID. So we must hand it SHA-256(H), not H, to stay
+            // symmetric with isValidSignature(_:for: digest) and OpenSSH (mirrors `sign(_ payload:)`).
+            let signedDigest = digest.withUnsafeBytes { SHA256.hash(data: $0) }
+            let signature = try key.signature(for: signedDigest, padding: .insecurePKCS1v1_5)
             return NIOSSHSignature(backingSignature: .rsaSHA256(.data(signature.rawRepresentation)))
         case .rsaSHA512(let key):
-            let signature = try key.signature(for: digest, padding: .insecurePKCS1v1_5)
+            let signedDigest = digest.withUnsafeBytes { SHA512.hash(data: $0) }
+            let signature = try key.signature(for: signedDigest, padding: .insecurePKCS1v1_5)
             return NIOSSHSignature(backingSignature: .rsaSHA512(.data(signature.rawRepresentation)))
 
         #if canImport(Darwin)
