@@ -1179,6 +1179,100 @@ final class SSHConnectionStateMachineTests: XCTestCase {
             loop: loop
         )
     }
+
+    /// Verify that a zlib@openssh.com compression stream remains CONTINUOUS across a
+    /// client-initiated re-key.  The deflate/inflate state is maintained by the
+    /// serializer/parser, which are threaded verbatim through every re-key state
+    /// transition; no re-key arm should reinstall or clear the codec.
+    ///
+    /// If the codec were dropped on the NEWKEYS transition the decompressor would see a
+    /// raw (non-zlib) byte stream and throw a decode error (or, if the test-only accessor
+    /// reports false, we fail before even attempting the round-trip).
+    func testCompressionStreamSurvivesRekey() throws {
+        let allocator = ByteBufferAllocator()
+        let loop = EmbeddedEventLoop()
+        var (client, server) = self.compressionEnabledPair()
+
+        try assertSuccessfulConnection(client: &client, server: &server, allocator: allocator, loop: loop)
+
+        // Compression negotiated (zlib@openssh.com) and activated at USERAUTH_SUCCESS.
+        XCTAssertTrue(client._testOnlyOutboundCompressionActive, "client outbound compressor active pre-rekey")
+        XCTAssertTrue(client._testOnlyInboundCompressionActive, "client inbound decompressor active pre-rekey")
+        XCTAssertTrue(server._testOnlyOutboundCompressionActive, "server outbound compressor active pre-rekey")
+        XCTAssertTrue(server._testOnlyInboundCompressionActive, "server inbound decompressor active pre-rekey")
+
+        // Drive a full client-initiated re-key to completion (same pattern as
+        // testStrictKexResetsSequenceNumbersOnRekey).
+        var buffer = allocator.buffer(capacity: 1024)
+        XCTAssertNoThrow(try client.beginRekeying(buffer: &buffer, allocator: allocator, loop: loop))
+        server.bufferInboundData(&buffer)
+        let serverResponse = try assertNoThrowWithValue(
+            server.processInboundMessage(allocator: allocator, loop: loop)
+        )
+        guard case .some(.emitMessage(let serverKexInit)) = serverResponse else {
+            XCTFail(
+                "Server should emit its KEXINIT in response to the rekey, got \(String(describing: serverResponse))"
+            )
+            return
+        }
+        try self.run(
+            clientMessage: nil,
+            client: &client,
+            serverMessage: serverKexInit,
+            server: &server,
+            allocator: allocator,
+            loop: loop
+        )
+
+        XCTAssertTrue(client.isActive, "client returns to active after the rekey")
+        XCTAssertTrue(server.isActive, "server returns to active after the rekey")
+
+        // The compression codec must STILL be installed after the re-key — the deflate/
+        // inflate stream is continuous, not reset.
+        XCTAssertTrue(
+            client._testOnlyOutboundCompressionActive,
+            "compression survives a re-key (client outbound)"
+        )
+        XCTAssertTrue(
+            client._testOnlyInboundCompressionActive,
+            "compression survives a re-key (client inbound)"
+        )
+        XCTAssertTrue(
+            server._testOnlyOutboundCompressionActive,
+            "compression survives a re-key (server outbound)"
+        )
+        XCTAssertTrue(
+            server._testOnlyInboundCompressionActive,
+            "compression survives a re-key (server inbound)"
+        )
+
+        // Channel data must still round-trip through the post-rekey compressed pipeline.
+        // Use a highly compressible payload so the deflate stream does real work.
+        let msg = SSHMessage.channelData(
+            .init(
+                recipientChannel: 0,
+                data: ByteBuffer(string: String(repeating: "compress-after-rekey ", count: 32))
+            )
+        )
+        XCTAssertNoThrow(
+            try self.assertForwardsToMultiplexer(
+                msg,
+                sender: &client,
+                receiver: &server,
+                allocator: allocator,
+                loop: loop
+            )
+        )
+        XCTAssertNoThrow(
+            try self.assertForwardsToMultiplexer(
+                msg,
+                sender: &server,
+                receiver: &client,
+                allocator: allocator,
+                loop: loop
+            )
+        )
+    }
 }
 
 extension Optional where Wrapped == SSHMultiMessage {
