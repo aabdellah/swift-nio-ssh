@@ -541,6 +541,38 @@ class EndToEndTests: XCTestCase {
         XCTAssertEqual(self.channel.activeServerChannels.count, 1)
     }
 
+    func testPublicRekeyInitiatesWhenActiveAndIsNoOpOtherwise() throws {
+        XCTAssertNoThrow(try self.channel.configureWithHarness(TestHarness()))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        let handler = self.channel.clientSSHHandler!
+        let baseline = handler.rekeyInitiationCount
+
+        // The public rekey() on a settled-active connection initiates a rekey.
+        handler.rekey()
+        XCTAssertEqual(handler.rekeyInitiationCount, baseline + 1)
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        // A handler that was never attached to a pipeline (no context) is a
+        // safe no-op: it must not crash, must not initiate a rekey, and must
+        // fail any supplied promise with ioOnClosedChannel.
+        let unattached = NIOSSHHandler(
+            role: .client(SSHClientConfiguration(
+                userAuthDelegate: TestHarness().clientAuthDelegate,
+                serverAuthDelegate: AcceptAllHostKeysDelegate()
+            )),
+            allocator: self.channel.client.allocator,
+            inboundChildChannelInitializer: nil
+        )
+        let promise = self.channel.client.eventLoop.makePromise(of: Void.self)
+        unattached.rekey(promise: promise)
+        XCTAssertEqual(unattached.rekeyInitiationCount, 0)
+        XCTAssertThrowsError(try promise.futureResult.wait()) { error in
+            XCTAssertEqual(error as? ChannelError, .ioOnClosedChannel)
+        }
+    }
+
     func testSupportServerInitiatedRekeying() throws {
         XCTAssertNoThrow(try self.channel.configureWithHarness(TestHarness()))
         XCTAssertNoThrow(try self.channel.activate())

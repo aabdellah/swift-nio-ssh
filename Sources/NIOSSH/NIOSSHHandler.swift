@@ -587,6 +587,24 @@ extension NIOSSHHandler {
     internal func _rekey() throws {
         self.initiateRekey(context: self.context!)
     }
+
+    /// Request a client-initiated key re-exchange. Safe to call at any
+    /// time: a no-op (the promise still succeeds) when the connection is
+    /// not currently rekeyable — i.e. mid-handshake or while a rekey is
+    /// already in flight (OpenSSH `~R` coalescing). Must be called on the
+    /// channel's event loop.
+    public func rekey(promise: EventLoopPromise<Void>? = nil) {
+        guard let context = self.context else {
+            promise?.fail(ChannelError.ioOnClosedChannel)
+            return
+        }
+        guard self.stateMachine.canRekey else {
+            promise?.succeed(())  // already handshaking/rekeying — coalesce
+            return
+        }
+        self.initiateRekey(context: context)
+        promise?.succeed(())
+    }
 }
 
 // MARK: Disconnect
