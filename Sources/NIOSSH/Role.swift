@@ -53,6 +53,13 @@ public enum SSHConnectionRole {
         case .server: return nil
         }
     }
+
+    var enableCompression: Bool {
+        switch self {
+        case .client(let config): return config.enableCompression
+        case .server(let config): return config.enableCompression
+        }
+    }
 }
 
 @available(*, unavailable)

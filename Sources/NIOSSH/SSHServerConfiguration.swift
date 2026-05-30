@@ -36,6 +36,12 @@ public struct SSHServerConfiguration {
     /// Defaults to `true`.
     public var enableStrictKeyExchange: Bool
 
+    /// Whether to advertise and negotiate zlib compression. When `true`, the server
+    /// offers `["zlib@openssh.com", "zlib", "none"]` in KEX_INIT; when `false`
+    /// (the default) it offers only `["none"]`, keeping behaviour byte-identical
+    /// to releases that predated compression support.
+    public var enableCompression: Bool
+
     public init(
         hostKeys: [NIOSSHPrivateKey],
         userAuthDelegate: NIOSSHServerUserAuthenticationDelegate,
@@ -77,6 +83,7 @@ public struct SSHServerConfiguration {
         self.banner = banner
         self.transportProtectionSchemes = transportProtectionSchemes
         self.enableStrictKeyExchange = true
+        self.enableCompression = false
     }
 }
 

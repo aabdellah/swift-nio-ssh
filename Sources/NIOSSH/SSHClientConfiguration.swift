@@ -40,6 +40,12 @@ public struct SSHClientConfiguration {
     /// rekeys that often. `nil` (the default) disables automatic rekeying.
     public var rekeyLimit: RekeyLimit?
 
+    /// Whether to advertise and negotiate zlib compression. When `true`, the client
+    /// offers `["zlib@openssh.com", "zlib", "none"]` in KEX_INIT; when `false`
+    /// (the default) it offers only `["none"]`, keeping behaviour byte-identical
+    /// to releases that predated compression support.
+    public var enableCompression: Bool
+
     public struct RekeyLimit: Sendable, Equatable {
         public var dataBytes: UInt64?
         public var interval: TimeAmount?
@@ -93,6 +99,7 @@ public struct SSHClientConfiguration {
         self.enableStrictKeyExchange = true
         self.preferredHostKeyAlgorithms = nil
         self.rekeyLimit = nil
+        self.enableCompression = false
     }
 }
 

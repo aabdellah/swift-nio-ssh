@@ -46,4 +46,9 @@ final class SSHCompressionTests: XCTestCase {
             XCTAssertEqual((error as? NIOSSHError)?.type, .protocolViolation)
         }
     }
+
+    func testCompressionOfferReflectsFlag() {
+        XCTAssertEqual(NIOSSHCompressionAlgorithm.disabledOffer, ["none"])
+        XCTAssertEqual(NIOSSHCompressionAlgorithm.enabledOffer, ["zlib@openssh.com", "zlib", "none"])
+    }
 }
