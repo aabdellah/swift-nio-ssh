@@ -1188,6 +1188,153 @@ final class SSHKeyExchangeStateMachineTests: XCTestCase {
         }
     }
 
+    // MARK: - Compression advertisement + negotiation tests
+
+    func testCompressionAdvertisementEnabled() throws {
+        // When enableCompression = true the KEXINIT must offer the full zlib list.
+        let allocator = ByteBufferAllocator()
+        let loop = EmbeddedEventLoop()
+        var clientConfig = SSHClientConfiguration(
+            userAuthDelegate: ExplodingAuthDelegate(),
+            serverAuthDelegate: AcceptAllHostKeysDelegate()
+        )
+        clientConfig.enableCompression = true
+        let client = SSHKeyExchangeStateMachine(
+            allocator: allocator,
+            loop: loop,
+            role: .client(clientConfig),
+            remoteVersion: Constants.version,
+            protectionSchemes: [AES256GCMOpenSSHTransportProtection.self],
+            previousSessionIdentifier: nil
+        )
+        let message = client.createKeyExchangeMessage()
+        XCTAssertEqual(
+            message.compressionAlgorithmsClientToServer,
+            NIOSSHCompressionAlgorithm.enabledOffer,
+            "client-to-server list must be enabledOffer when compression is on"
+        )
+        XCTAssertEqual(
+            message.compressionAlgorithmsServerToClient,
+            NIOSSHCompressionAlgorithm.enabledOffer,
+            "server-to-client list must be enabledOffer when compression is on"
+        )
+    }
+
+    func testCompressionAdvertisementDisabled() throws {
+        // When enableCompression = false (the default) the KEXINIT must offer only ["none"].
+        let allocator = ByteBufferAllocator()
+        let loop = EmbeddedEventLoop()
+        let client = SSHKeyExchangeStateMachine(
+            allocator: allocator,
+            loop: loop,
+            role: .client(
+                .init(userAuthDelegate: ExplodingAuthDelegate(), serverAuthDelegate: AcceptAllHostKeysDelegate())
+            ),
+            remoteVersion: Constants.version,
+            protectionSchemes: [AES256GCMOpenSSHTransportProtection.self],
+            previousSessionIdentifier: nil
+        )
+        let message = client.createKeyExchangeMessage()
+        XCTAssertEqual(
+            message.compressionAlgorithmsClientToServer,
+            NIOSSHCompressionAlgorithm.disabledOffer,
+            "client-to-server list must be disabledOffer when compression is off"
+        )
+        XCTAssertEqual(
+            message.compressionAlgorithmsServerToClient,
+            NIOSSHCompressionAlgorithm.disabledOffer,
+            "server-to-client list must be disabledOffer when compression is off"
+        )
+    }
+
+    func testCompressionNegotiationSelectsZlibDelayed() throws {
+        // When the client has compression enabled and the peer KEXINIT advertises
+        // "zlib@openssh.com", the negotiated result must be .zlibDelayed.
+        let allocator = ByteBufferAllocator()
+        let loop = EmbeddedEventLoop()
+
+        var clientConfig = SSHClientConfiguration(
+            userAuthDelegate: ExplodingAuthDelegate(),
+            serverAuthDelegate: AcceptAllHostKeysDelegate()
+        )
+        clientConfig.enableCompression = true
+        var client = SSHKeyExchangeStateMachine(
+            allocator: allocator,
+            loop: loop,
+            role: .client(clientConfig),
+            remoteVersion: Constants.version,
+            protectionSchemes: [AES256GCMOpenSSHTransportProtection.self],
+            previousSessionIdentifier: nil
+        )
+
+        // Build a peer KEXINIT from a vanilla server and override its compression lists
+        // to advertise zlib@openssh.com as the preferred algorithm.
+        let server = SSHKeyExchangeStateMachine(
+            allocator: allocator,
+            loop: loop,
+            role: .server(.init(hostKeys: [.init(ed25519Key: .init())], userAuthDelegate: DenyAllServerAuthDelegate())),
+            remoteVersion: Constants.version,
+            protectionSchemes: [AES256GCMOpenSSHTransportProtection.self],
+            previousSessionIdentifier: nil
+        )
+        var serverMessage = server.createKeyExchangeMessage()
+        serverMessage.compressionAlgorithmsClientToServer = ["zlib@openssh.com", "none"]
+        serverMessage.compressionAlgorithmsServerToClient = ["zlib@openssh.com", "none"]
+
+        let clientMessage = client.createKeyExchangeMessage()
+        client.send(keyExchange: clientMessage)
+
+        // Drive negotiation: client handles the server's KEXINIT from .keyExchangeSent state.
+        _ = try client.handle(keyExchange: serverMessage)
+
+        XCTAssertEqual(
+            client._testOnly_negotiatedCompression,
+            .zlibDelayed,
+            "must negotiate zlibDelayed when peer offers zlib@openssh.com and compression is enabled"
+        )
+    }
+
+    func testCompressionNegotiationFallsBackToNoneWhenDisabled() throws {
+        // When the client has compression disabled, even if the peer offers zlib@openssh.com,
+        // the negotiated result must be .none.
+        let allocator = ByteBufferAllocator()
+        let loop = EmbeddedEventLoop()
+
+        var client = SSHKeyExchangeStateMachine(
+            allocator: allocator,
+            loop: loop,
+            role: .client(
+                .init(userAuthDelegate: ExplodingAuthDelegate(), serverAuthDelegate: AcceptAllHostKeysDelegate())
+            ),
+            remoteVersion: Constants.version,
+            protectionSchemes: [AES256GCMOpenSSHTransportProtection.self],
+            previousSessionIdentifier: nil
+        )
+
+        let server = SSHKeyExchangeStateMachine(
+            allocator: allocator,
+            loop: loop,
+            role: .server(.init(hostKeys: [.init(ed25519Key: .init())], userAuthDelegate: DenyAllServerAuthDelegate())),
+            remoteVersion: Constants.version,
+            protectionSchemes: [AES256GCMOpenSSHTransportProtection.self],
+            previousSessionIdentifier: nil
+        )
+        var serverMessage = server.createKeyExchangeMessage()
+        serverMessage.compressionAlgorithmsClientToServer = ["zlib@openssh.com", "none"]
+        serverMessage.compressionAlgorithmsServerToClient = ["zlib@openssh.com", "none"]
+
+        let clientMessage = client.createKeyExchangeMessage()
+        client.send(keyExchange: clientMessage)
+
+        _ = try client.handle(keyExchange: serverMessage)
+
+        XCTAssertEqual(
+            client._testOnly_negotiatedCompression,
+            NIOSSHCompressionAlgorithm.none,
+            "must negotiate none when compression is disabled even if peer offers zlib"
+        )
+    }
+
     func testKeyExchangeClientRejectsHostKeyAsynchronously() throws {
         // This test runs a full key exchange where the client rejects the server's host key, on a delay. This should
         // error.

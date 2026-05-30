@@ -174,8 +174,10 @@ struct SSHKeyExchangeStateMachine {
             encryptionAlgorithmsServerToClient: encryptionAlgorithms,
             macAlgorithmsClientToServer: macAlgorithms,
             macAlgorithmsServerToClient: macAlgorithms,
-            compressionAlgorithmsClientToServer: ["none"],
-            compressionAlgorithmsServerToClient: ["none"],
+            compressionAlgorithmsClientToServer: self.role.enableCompression
+                ? NIOSSHCompressionAlgorithm.enabledOffer : NIOSSHCompressionAlgorithm.disabledOffer,
+            compressionAlgorithmsServerToClient: self.role.enableCompression
+                ? NIOSSHCompressionAlgorithm.enabledOffer : NIOSSHCompressionAlgorithm.disabledOffer,
             languagesClientToServer: [],
             languagesServerToClient: [],
             firstKexPacketFollows: false
@@ -479,11 +481,28 @@ struct SSHKeyExchangeStateMachine {
             throw NIOSSHError.keyExchangeNegotiationFailure
         }
 
+        // Negotiate compression using the client-preference list.
+        let clientComp: [Substring]
+        let serverComp: [Substring]
+        switch self.role {
+        case .client:
+            clientComp = self.role.enableCompression
+                ? NIOSSHCompressionAlgorithm.enabledOffer : NIOSSHCompressionAlgorithm.disabledOffer
+            serverComp = message.compressionAlgorithmsClientToServer
+        case .server:
+            clientComp = message.compressionAlgorithmsClientToServer
+            serverComp = self.role.enableCompression
+                ? NIOSSHCompressionAlgorithm.enabledOffer : NIOSSHCompressionAlgorithm.disabledOffer
+        }
+        let compName = clientComp.first(where: { serverComp.contains($0) }) ?? "none"
+        let negotiatedCompression = NIOSSHCompressionAlgorithm(wireName: compName) ?? .none
+
         // Great, we have a protection scheme. Build the negotiation result.
         return NegotiationResult(
             negotiatedKeyExchangeAlgorithm: keyExchange,
             negotiatedHostKeyAlgorithm: hostKey,
-            negotiatedProtection: scheme
+            negotiatedProtection: scheme,
+            negotiatedCompression: negotiatedCompression
         )
     }
 
@@ -714,6 +733,8 @@ extension SSHKeyExchangeStateMachine {
 
         var negotiatedProtection: NIOSSHTransportProtection.Type
 
+        var negotiatedCompression: NIOSSHCompressionAlgorithm
+
         func negotiatedHostKey(_ keys: [NIOSSHPrivateKey]) -> NIOSSHPrivateKey {
             // This force-unwrap is safe: to fail to obtain it is a programming error, as we must have negotiated
             // the host key algorithm.
@@ -751,6 +772,23 @@ extension SSHKeyExchangeStateMachine {
             .newKeysReceived(_, _, let negotiated),
             .newKeysSent(_, _, let negotiated):
             return negotiated.negotiatedHostKeyAlgorithm
+        }
+    }
+
+    var _testOnly_negotiatedCompression: NIOSSHCompressionAlgorithm? {
+        switch self.state {
+        case .idle, .keyExchangeSent, .complete:
+            return nil
+
+        case .keyExchangeReceived(_, let negotiated, _),
+            .awaitingKeyExchangeInitInvalidGuess(_, let negotiated),
+            .awaitingKeyExchangeInit(_, let negotiated),
+            .keyExchangeInitReceived(_, let negotiated),
+            .keyExchangeInitSent(_, let negotiated),
+            .keysExchanged(_, _, let negotiated),
+            .newKeysReceived(_, _, let negotiated),
+            .newKeysSent(_, _, let negotiated):
+            return negotiated.negotiatedCompression
         }
     }
 }
