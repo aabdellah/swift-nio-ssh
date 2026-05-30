@@ -30,7 +30,14 @@ struct SSHPacketParser {
     private var decompressor: ZlibDecompressor?
 
     /// Maximum decompressed size for a single SSH packet (256 KiB).
-    private static let maxDecompressedPacket = 256 * 1024
+    /// Decompression-bomb guard: a single packet may not decompress beyond the largest
+    /// legitimate SSH payload. Channel data is bounded by the advertised channel
+    /// `maximumPacketSize` (`1 << 24` = 16 MiB; see `SSHChildChannel`), plus a small margin
+    /// for the message framing (type + channel + length). This still bounds a malicious
+    /// peer's inflation ratio — a 256 KiB transport packet can inflate to at most ~16 MiB,
+    /// not deflate's theoretical ~256 MiB. A 256 KiB cap would wrongly reject a legitimate
+    /// large, highly compressible channel-data packet (e.g. a post-re-key data burst).
+    private static let maxDecompressedPacket = (1 << 24) + 4096
 
     /// Whether the client currently has a `keyboard-interactive` `SSH_MSG_USERAUTH_REQUEST`
     /// in flight. This is the *only* correct way to disambiguate inbound message number 60,

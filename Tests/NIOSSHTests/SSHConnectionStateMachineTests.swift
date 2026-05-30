@@ -1180,14 +1180,16 @@ final class SSHConnectionStateMachineTests: XCTestCase {
         )
     }
 
-    /// Verify that a zlib@openssh.com compression stream remains CONTINUOUS across a
-    /// client-initiated re-key.  The deflate/inflate state is maintained by the
-    /// serializer/parser, which are threaded verbatim through every re-key state
-    /// transition; no re-key arm should reinstall or clear the codec.
+    /// Verify that zlib@openssh.com compression remains ACTIVE and functional across a
+    /// client-initiated re-key. OpenSSH re-initializes its compression stream at every
+    /// re-key's NEWKEYS (a fresh zlib stream, header `0x78 0x9c`), so the engine resets
+    /// the compressor when it sends a re-key NEWKEYS and the decompressor when it receives
+    /// one — mirroring the cipher and strict-KEX sequence-number resets. Both ends reset
+    /// symmetrically, so channel data must still round-trip after the re-key.
     ///
-    /// If the codec were dropped on the NEWKEYS transition the decompressor would see a
-    /// raw (non-zlib) byte stream and throw a decode error (or, if the test-only accessor
-    /// reports false, we fail before even attempting the round-trip).
+    /// (This NIO-to-NIO test cannot distinguish "reset" from "continuous" — both ends would
+    /// agree either way; the authoritative check is the real-OpenSSH compression+rekey
+    /// interop test, which fails if the engine does NOT reset.)
     func testCompressionStreamSurvivesRekey() throws {
         let allocator = ByteBufferAllocator()
         let loop = EmbeddedEventLoop()
@@ -1227,8 +1229,7 @@ final class SSHConnectionStateMachineTests: XCTestCase {
         XCTAssertTrue(client.isActive, "client returns to active after the rekey")
         XCTAssertTrue(server.isActive, "server returns to active after the rekey")
 
-        // The compression codec must STILL be installed after the re-key — the deflate/
-        // inflate stream is continuous, not reset.
+        // The compression codec must STILL be installed (re-initialized) after the re-key.
         XCTAssertTrue(
             client._testOnlyOutboundCompressionActive,
             "compression survives a re-key (client outbound)"

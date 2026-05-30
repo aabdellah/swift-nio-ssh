@@ -637,6 +637,14 @@ struct SSHConnectionStateMachine {
                         return result
                     case .newKeys:
                         try state.receiveNewKeysMessage()
+                        // OpenSSH resets the compression stream at every re-key's NEWKEYS
+                        // (a fresh zlib stream follows). Re-initialize the inbound
+                        // decompressor so it tracks the peer's new stream; continuing the
+                        // old stream desyncs (inflate Z_DATA_ERROR). See receiveNewKeysMessage
+                        // (strict-KEX seqno reset) — the same NEWKEYS reset boundary.
+                        if state.parser.isCompressionActive {
+                            state.parser.addCompression(try ZlibDecompressor())
+                        }
                         let newState = RekeyingReceivedNewKeysState(state)
                         self = .rekeyingReceivedNewKeysState(newState)
                         return .noMessage
@@ -768,6 +776,11 @@ struct SSHConnectionStateMachine {
                         return result
                     case .newKeys:
                         try state.receiveNewKeysMessage()
+                        // Re-key NEWKEYS received: reset the inbound decompressor to track
+                        // the peer's fresh zlib stream (OpenSSH resets compression per re-key).
+                        if state.parser.isCompressionActive {
+                            state.parser.addCompression(try ZlibDecompressor())
+                        }
                         let newState = ActiveState(state)
                         self = .active(newState)
                         return .noMessage
@@ -1166,6 +1179,12 @@ struct SSHConnectionStateMachine {
                 self.state = .rekeying(state)
             case .newKeys:
                 try state.writeNewKeysMessage(into: &buffer)
+                // Re-key NEWKEYS sent: reset the outbound compressor to a fresh zlib stream
+                // so the peer (which resets its decompressor on receiving our NEWKEYS) can
+                // decode our post-re-key packets. Matches OpenSSH's per-re-key compression reset.
+                if state.serializer.isCompressionActive {
+                    state.serializer.addCompression(try ZlibCompressor())
+                }
                 self.state = .rekeyingSentNewKeysState(.init(state))
 
             case .disconnect:
@@ -1197,6 +1216,11 @@ struct SSHConnectionStateMachine {
                 self.state = .rekeyingReceivedNewKeysState(state)
             case .newKeys:
                 try state.writeNewKeysMessage(into: &buffer)
+                // Re-key NEWKEYS sent: reset the outbound compressor (fresh zlib stream),
+                // matching OpenSSH's per-re-key compression reset.
+                if state.serializer.isCompressionActive {
+                    state.serializer.addCompression(try ZlibCompressor())
+                }
                 self.state = .active(.init(state))
 
             case .disconnect:
