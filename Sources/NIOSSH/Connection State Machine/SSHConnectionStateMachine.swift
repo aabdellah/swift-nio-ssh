@@ -165,6 +165,15 @@ struct SSHConnectionStateMachine {
                         return result
                     case .newKeys:
                         try state.receiveNewKeysMessage()
+
+                        // Initial-KEX inbound NEWKEYS. `.zlib` (RFC 4253) activates per
+                        // direction at NEWKEYS exactly where decryption is installed; this is
+                        // the inbound side, so install the parser decompressor here. (Re-keys
+                        // never reach this arm — they flow through `.rekeying*`.)
+                        if state.keyExchangeStateMachine.negotiatedCompressionAlgorithm == .zlib {
+                            state.parser.addCompression(try ZlibDecompressor())
+                        }
+
                         self = .receivedNewKeys(.init(keyExchangeState: state, loop: loop))
                         return .noMessage
                     case .disconnect:
@@ -224,6 +233,13 @@ struct SSHConnectionStateMachine {
                         return result
                     case .newKeys:
                         try state.receiveNewKeysMessage()
+
+                        // Initial-KEX inbound NEWKEYS (this side already sent its NEWKEYS).
+                        // `.zlib` (immediate) activates the inbound decompressor here.
+                        if state.keyExchangeStateMachine.negotiatedCompressionAlgorithm == .zlib {
+                            state.parser.addCompression(try ZlibDecompressor())
+                        }
+
                         self = .userAuthentication(.init(sentNewKeysState: state))
                         return .noMessage
                     case .disconnect:
@@ -338,6 +354,16 @@ struct SSHConnectionStateMachine {
 
                     case .userAuthSuccess:
                         let result = try state.receiveUserAuthSuccess()
+
+                        // `zlib@openssh.com` (`.zlibDelayed`) activates BOTH directions at
+                        // this side's USERAUTH_SUCCESS — for the client, that is when it
+                        // RECEIVES userAuthSuccess. Install both codecs before copying the
+                        // serializer/parser into ActiveState.
+                        if state.negotiatedCompression == .zlibDelayed {
+                            state.serializer.addCompression(try ZlibCompressor())
+                            state.parser.addCompression(try ZlibDecompressor())
+                        }
+
                         // Hey, auth succeeded!
                         self = .active(ActiveState(state))
                         return result
@@ -862,6 +888,16 @@ struct SSHConnectionStateMachine {
                 self.state = .keyExchange(kex)
             case .newKeys:
                 try kex.writeNewKeysMessage(into: &buffer)
+
+                // Compression activation (initial KEX only — re-keys are handled by the
+                // `.rekeying*` arms, which intentionally do NOT install, to preserve the
+                // compression stream across re-keys). `.zlib` (RFC 4253) activates per
+                // direction at NEWKEYS exactly where encryption is installed; this is the
+                // outbound side, so install the serializer compressor here.
+                if kex.keyExchangeStateMachine.negotiatedCompressionAlgorithm == .zlib {
+                    kex.serializer.addCompression(try ZlibCompressor())
+                }
+
                 let newState = SentNewKeysState(keyExchangeState: kex, loop: loop)
                 let possibleMessage = newState.userAuthStateMachine.beginAuthentication()
                 self.state = .sentNewKeys(newState)
@@ -904,6 +940,12 @@ struct SSHConnectionStateMachine {
                 self.state = .receivedNewKeys(kex)
             case .newKeys:
                 try kex.writeNewKeysMessage(into: &buffer)
+
+                // Initial-KEX outbound NEWKEYS (this side already received the peer's
+                // NEWKEYS). `.zlib` (immediate) activates the outbound compressor here.
+                if kex.keyExchangeStateMachine.negotiatedCompressionAlgorithm == .zlib {
+                    kex.serializer.addCompression(try ZlibCompressor())
+                }
 
                 let newState = UserAuthenticationState(receivedNewKeysState: kex)
                 let possibleMessage = newState.userAuthStateMachine.beginAuthentication()
@@ -990,6 +1032,15 @@ struct SSHConnectionStateMachine {
 
             case .userAuthSuccess:
                 try state.writeUserAuthSuccess(into: &buffer)
+
+                // `zlib@openssh.com` (`.zlibDelayed`) activates BOTH directions at this
+                // side's USERAUTH_SUCCESS — for the server, that is when it SENDS
+                // userAuthSuccess. Install both codecs before copying into ActiveState.
+                if state.negotiatedCompression == .zlibDelayed {
+                    state.serializer.addCompression(try ZlibCompressor())
+                    state.parser.addCompression(try ZlibDecompressor())
+                }
+
                 // Ok we're good to go!
                 self.state = .active(ActiveState(state))
 
@@ -1317,6 +1368,18 @@ extension SSHConnectionStateMachine {
     var _testOnlyInboundSequenceNumber: UInt32? {
         if case .active(let state) = self.state { return state.parser.sequenceNumber }
         return nil
+    }
+
+    /// Test-only: whether the active state's serializer has an outbound compressor installed.
+    var _testOnlyOutboundCompressionActive: Bool {
+        if case .active(let state) = self.state { return state.serializer.isCompressionActive }
+        return false
+    }
+
+    /// Test-only: whether the active state's parser has an inbound decompressor installed.
+    var _testOnlyInboundCompressionActive: Bool {
+        if case .active(let state) = self.state { return state.parser.isCompressionActive }
+        return false
     }
 
     var role: SSHConnectionRole {

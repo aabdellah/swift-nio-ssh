@@ -49,6 +49,11 @@ struct SSHPacketSerializer {
         self.compressor = compressor
     }
 
+    /// Whether an outbound compressor is currently installed.
+    var isCompressionActive: Bool {
+        self.compressor != nil
+    }
+
     mutating func serialize(message: SSHMessage, to buffer: inout ByteBuffer) throws {
         switch self.state {
         case .initialized:

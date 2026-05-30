@@ -1103,6 +1103,82 @@ final class SSHConnectionStateMachineTests: XCTestCase {
         XCTAssertEqual(server._testOnlyOutboundSequenceNumber, 0, "server outbound seqno reset after rekey NEWKEYS")
         XCTAssertEqual(server._testOnlyInboundSequenceNumber, 0, "server inbound seqno reset after rekey NEWKEYS")
     }
+
+    /// Build a client/server pair that both advertise compression. Default negotiation
+    /// (`["zlib@openssh.com", "zlib", "none"]` on both sides) selects `.zlibDelayed`.
+    private func compressionEnabledPair() -> (SSHConnectionStateMachine, SSHConnectionStateMachine) {
+        var clientConfig = SSHClientConfiguration(
+            userAuthDelegate: InfinitePasswordDelegate(),
+            serverAuthDelegate: AcceptAllHostKeysDelegate()
+        )
+        clientConfig.enableCompression = true
+
+        var serverConfig = SSHServerConfiguration(
+            hostKeys: [NIOSSHPrivateKey(ed25519Key: .init())],
+            userAuthDelegate: DenyThenAcceptDelegate(messagesToDeny: 1)
+        )
+        serverConfig.enableCompression = true
+
+        let client = SSHConnectionStateMachine(role: .client(clientConfig))
+        let server = SSHConnectionStateMachine(role: .server(serverConfig))
+        return (client, server)
+    }
+
+    func testDelayedCompressionActiveAfterAuth() throws {
+        let allocator = ByteBufferAllocator()
+        let loop = EmbeddedEventLoop()
+        var (client, server) = self.compressionEnabledPair()
+
+        // Before auth completes there is no active state, so nothing is installed.
+        XCTAssertFalse(client._testOnlyOutboundCompressionActive)
+        XCTAssertFalse(client._testOnlyInboundCompressionActive)
+
+        try assertSuccessfulConnection(client: &client, server: &server, allocator: allocator, loop: loop)
+        XCTAssertTrue(client.isActive)
+        XCTAssertTrue(server.isActive)
+
+        // `.zlibDelayed` (the default negotiation) installs BOTH directions at
+        // USERAUTH_SUCCESS — for both peers, by the time we reach `.active`.
+        XCTAssertTrue(client._testOnlyOutboundCompressionActive, "client outbound compressor installed after auth")
+        XCTAssertTrue(client._testOnlyInboundCompressionActive, "client inbound decompressor installed after auth")
+        XCTAssertTrue(server._testOnlyOutboundCompressionActive, "server outbound compressor installed after auth")
+        XCTAssertTrue(server._testOnlyInboundCompressionActive, "server inbound decompressor installed after auth")
+    }
+
+    func testSymmetricCompressedChannelDataRoundTrips() throws {
+        let allocator = ByteBufferAllocator()
+        let loop = EmbeddedEventLoop()
+        var (client, server) = self.compressionEnabledPair()
+
+        try assertSuccessfulConnection(client: &client, server: &server, allocator: allocator, loop: loop)
+        XCTAssertTrue(client.isActive)
+        XCTAssertTrue(server.isActive)
+
+        // Use a compressible payload so the deflate stream actually does work; the
+        // message must survive serialize→compress→encrypt→decrypt→decompress→parse
+        // intact in both directions.
+        var payload = allocator.buffer(capacity: 256)
+        payload.writeString(String(repeating: "compressible-channel-data-", count: 8))
+        let message = SSHMessage.channelData(.init(recipientChannel: 0, data: payload))
+
+        // client → server through the now-compressed pipeline.
+        try self.assertForwardsToMultiplexer(
+            message,
+            sender: &client,
+            receiver: &server,
+            allocator: allocator,
+            loop: loop
+        )
+
+        // server → client through the now-compressed pipeline.
+        try self.assertForwardsToMultiplexer(
+            message,
+            sender: &server,
+            receiver: &client,
+            allocator: allocator,
+            loop: loop
+        )
+    }
 }
 
 extension Optional where Wrapped == SSHMultiMessage {

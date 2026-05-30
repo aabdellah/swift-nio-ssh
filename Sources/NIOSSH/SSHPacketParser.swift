@@ -81,6 +81,11 @@ struct SSHPacketParser {
         self.decompressor = decompressor
     }
 
+    /// Whether an inbound decompressor is currently installed.
+    var isCompressionActive: Bool {
+        self.decompressor != nil
+    }
+
     mutating func nextPacket() throws -> SSHMessage? {
         // This parser has a slightly strange strategy: we leave the packet length field in the buffer until we're done.
         // This is necessary because some transport protection schemes need the length field for MACing purposes, and can

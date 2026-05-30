@@ -104,6 +104,13 @@ struct SSHKeyExchangeStateMachine {
     /// re-keys (draft-miller-sshm-strict-kex).
     private(set) var strictKexEnabled: Bool
 
+    /// The compression algorithm negotiated for this connection. Stored (not derived from
+    /// the state enum) so it survives the transition to `.complete`, which discards the
+    /// `NegotiationResult`. Set during `negotiatedAlgorithms`. Read by the connection state
+    /// machine to decide whether (and when) to install the zlib codec at NEWKEYS /
+    /// USERAUTH_SUCCESS. Mirrors how `strictKexEnabled` is stored and survives `.complete`.
+    private(set) var negotiatedCompressionAlgorithm: NIOSSHCompressionAlgorithm = .none
+
     /// Whether this is the initial key exchange (not a rekey).
     private var isInitialKeyExchange: Bool {
         self.previousSessionIdentifier == nil
@@ -497,6 +504,11 @@ struct SSHKeyExchangeStateMachine {
         let compName = clientComp.first(where: { serverComp.contains($0) }) ?? "none"
         let negotiatedCompression = NIOSSHCompressionAlgorithm(wireName: compName) ?? .none
 
+        // Persist the negotiated compression on the machine so it survives the `.complete`
+        // transition (which drops the NegotiationResult). The connection state machine reads
+        // this at NEWKEYS / USERAUTH_SUCCESS to install the codec.
+        self.negotiatedCompressionAlgorithm = negotiatedCompression
+
         // Great, we have a protection scheme. Build the negotiation result.
         return NegotiationResult(
             negotiatedKeyExchangeAlgorithm: keyExchange,
@@ -775,6 +787,11 @@ extension SSHKeyExchangeStateMachine {
         }
     }
 
+    /// Test-only: the compression algorithm carried in the current negotiation state,
+    /// or `nil` before negotiation completes / after the machine reaches `.complete`.
+    /// Existing KEX tests read this immediately after `handle(keyExchange:)`, while the
+    /// machine still carries the `NegotiationResult`. Non-test code should read the
+    /// stored `negotiatedCompressionAlgorithm` instead, which survives `.complete`.
     var _testOnly_negotiatedCompression: NIOSSHCompressionAlgorithm? {
         switch self.state {
         case .idle, .keyExchangeSent, .complete:

@@ -37,6 +37,13 @@ extension SSHConnectionStateMachine {
         /// this is only sent on the initial KEX). See `SSHKeyExchangeStateMachine`.
         let strictKexEnabled: Bool
 
+        /// The compression algorithm negotiated on this connection's initial key exchange.
+        /// Carried forward from the KEX machine so the USERAUTH_SUCCESS transition can install
+        /// the `zlib@openssh.com` (`.zlibDelayed`) codec at the right moment. `.zlib` (immediate)
+        /// and `.none` are already handled at NEWKEYS; this field exists primarily for the
+        /// delayed case but is threaded for all algorithms for symmetry. See `SSHCompression`.
+        let negotiatedCompression: NIOSSHCompressionAlgorithm
+
         /// The backing state machine.
         var userAuthStateMachine: UserAuthenticationStateMachine
 
@@ -49,6 +56,7 @@ extension SSHConnectionStateMachine {
             self.protectionSchemes = state.protectionSchemes
             self.sessionIdentifier = state.sessionIdentifier
             self.strictKexEnabled = state.keyExchangeStateMachine.strictKexEnabled
+            self.negotiatedCompression = state.keyExchangeStateMachine.negotiatedCompressionAlgorithm
         }
 
         init(receivedNewKeysState state: ReceivedNewKeysState) {
@@ -60,6 +68,7 @@ extension SSHConnectionStateMachine {
             self.protectionSchemes = state.protectionSchemes
             self.sessionIdentifier = state.sessionIdentifier
             self.strictKexEnabled = state.keyExchangeStateMachine.strictKexEnabled
+            self.negotiatedCompression = state.keyExchangeStateMachine.negotiatedCompressionAlgorithm
         }
 
         mutating func bufferInboundData(_ data: inout ByteBuffer) {
