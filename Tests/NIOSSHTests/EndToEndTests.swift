@@ -310,6 +310,7 @@ class EndToEndTests: XCTestCase {
         )
         helper(SSHChannelRequestEvent.LocalFlowControlRequest(clientCanDo: true))
         helper(SSHChannelRequestEvent.SignalRequest(signal: "USR1"))
+        helper(SSHChannelRequestEvent.BreakRequest(breakLength: 1000, wantReply: false))
         helper(ChannelSuccessEvent())
         helper(ChannelFailureEvent())
     }

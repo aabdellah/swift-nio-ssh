@@ -593,6 +593,12 @@ extension NIOSSHHandler {
     /// not currently rekeyable — i.e. mid-handshake or while a rekey is
     /// already in flight (OpenSSH `~R` coalescing). Must be called on the
     /// channel's event loop.
+    ///
+    /// The promise reflects that the rekey was *initiated*, not that it
+    /// completed: a failure to serialize/send the KEXINIT surfaces via
+    /// `fireErrorCaught` on the pipeline (as for the internal threshold
+    /// rekey), not by failing this promise. The promise fails only when
+    /// there is no live channel context.
     public func rekey(promise: EventLoopPromise<Void>? = nil) {
         guard let context = self.context else {
             promise?.fail(ChannelError.ioOnClosedChannel)

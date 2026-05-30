@@ -322,7 +322,9 @@ public enum SSHChannelRequestEvent: Sendable {
         fileprivate var _breakLength: UInt32
 
         public init(breakLength: Int, wantReply: Bool = false) {
-            self._breakLength = UInt32(breakLength)
+            // Clamp rather than trap: a public initializer must not crash on
+            // an out-of-range break length (RFC 4335 break-length is uint32 ms).
+            self._breakLength = UInt32(clamping: breakLength)
             self.wantReply = wantReply
         }
 
