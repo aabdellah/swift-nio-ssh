@@ -42,9 +42,14 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-atomics.git", from: "1.0.2"),
     ],
     targets: [
+        .systemLibrary(
+            name: "CZlib",
+            path: "Sources/CZlib"
+        ),
         .target(
             name: "NIOSSH",
             dependencies: [
+                "CZlib",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
@@ -88,6 +93,7 @@ let package = Package(
         .testTarget(
             name: "NIOSSHTests",
             dependencies: [
+                "CZlib",
                 "NIOSSH",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
