@@ -23,6 +23,7 @@ struct SSHPacketSerializer {
 
     private var state: State = .initialized
     private(set) var sequenceNumber: UInt32 = 0
+    private var compressor: ZlibCompressor?
 
     /// Resets the outbound sequence number to 0.
     /// Used by strict KEX (Terrapin CVE-2023-48795 mitigation) after sending SSH_MSG_NEWKEYS.
@@ -40,6 +41,12 @@ struct SSHPacketSerializer {
         case .initialized:
             preconditionFailure("Adding encryption in invalid state: \(self.state)")
         }
+    }
+
+    /// Install a compressor. Must be called after `addEncryption`; compression only applies
+    /// to the encrypted path. Has no effect on cleartext packets.
+    mutating func addCompression(_ compressor: ZlibCompressor) {
+        self.compressor = compressor
     }
 
     mutating func serialize(message: SSHMessage, to buffer: inout ByteBuffer) throws {
@@ -60,11 +67,22 @@ struct SSHPacketSerializer {
         case .encrypted(let protection):
             let index = buffer.readerIndex
             buffer.moveReaderIndex(to: buffer.writerIndex)
-            buffer.writeSSHPacket(
-                message: message,
-                lengthIncludedInPadding: protection.lengthIncludedInPadding,
-                blockSize: protection.cipherBlockSize
-            )
+            if let compressor = self.compressor {
+                var payload = ByteBufferAllocator().buffer(capacity: 256)
+                payload.writeSSHMessage(message)
+                let compressed = try compressor.compress(payload)
+                buffer.writeSSHPacket(
+                    payloadBytes: compressed,
+                    lengthIncludedInPadding: protection.lengthIncludedInPadding,
+                    blockSize: protection.cipherBlockSize
+                )
+            } else {
+                buffer.writeSSHPacket(
+                    message: message,
+                    lengthIncludedInPadding: protection.lengthIncludedInPadding,
+                    blockSize: protection.cipherBlockSize
+                )
+            }
             try protection.encryptPacket(&buffer, sequenceNumber: self.sequenceNumber)
             buffer.moveReaderIndex(to: index)
             self.sequenceNumber &+= 1
@@ -73,6 +91,29 @@ struct SSHPacketSerializer {
 }
 
 extension ByteBuffer {
+    /// Variant of `writeSSHPacket` that frames an already-serialized (and optionally compressed)
+    /// payload buffer instead of serializing a message inline. Framing/padding math is identical
+    /// to the message-based overload.
+    mutating func writeSSHPacket(payloadBytes: ByteBuffer, lengthIncludedInPadding: Bool, blockSize: Int) {
+        let index = self.writerIndex
+
+        self.writeMultipleIntegers(UInt32(0), UInt8(0))
+        let messageLength = payloadBytes.readableBytes
+        var pb = payloadBytes
+        _ = self.writeBuffer(&pb)
+
+        let payloadLength = lengthIncludedInPadding ? messageLength + 5 : messageLength + 1
+        var paddingLength = blockSize - (payloadLength % blockSize)
+        if paddingLength < 4 {
+            paddingLength += blockSize
+        }
+
+        let packetLength = 1 + messageLength + paddingLength
+        self.setInteger(UInt32(packetLength), at: index)
+        self.setInteger(UInt8(paddingLength), at: index + 4)
+        self.writeSSHPaddingBytes(count: paddingLength)
+    }
+
     mutating func writeSSHPacket(message: SSHMessage, lengthIncludedInPadding: Bool, blockSize: Int) {
         let index = self.writerIndex
 

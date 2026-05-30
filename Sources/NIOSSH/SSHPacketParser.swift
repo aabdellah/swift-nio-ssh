@@ -27,6 +27,10 @@ struct SSHPacketParser {
     private var buffer: ByteBuffer
     private var state: State
     private(set) var sequenceNumber: UInt32
+    private var decompressor: ZlibDecompressor?
+
+    /// Maximum decompressed size for a single SSH packet (256 KiB).
+    private static let maxDecompressedPacket = 256 * 1024
 
     /// Whether the client currently has a `keyboard-interactive` `SSH_MSG_USERAUTH_REQUEST`
     /// in flight. This is the *only* correct way to disambiguate inbound message number 60,
@@ -69,6 +73,12 @@ struct SSHPacketParser {
         case .cleartextWaitingForBytes, .initialized, .encryptedWaitingForBytes:
             preconditionFailure("Adding encryption in invalid state: \(self.state)")
         }
+    }
+
+    /// Install a decompressor. Packets received after this call will be decompressed
+    /// after decryption before being parsed.
+    mutating func addCompression(_ decompressor: ZlibDecompressor) {
+        self.decompressor = decompressor
     }
 
     mutating func nextPacket() throws -> SSHMessage? {
@@ -206,12 +216,21 @@ struct SSHPacketParser {
 
     private mutating func parseCiphertext(length: UInt32, protection: NIOSSHTransportProtection) throws -> SSHMessage? {
         let expectingInfoRequest = self.clientExpectingKeyboardInteractiveInfoRequest
+        // Hoist decompressor out of self before entering the closure to avoid
+        // overlapping access to self (the closure also mutates self.buffer via
+        // rewindReaderOnError).
+        let decompressor = self.decompressor
         return try self.buffer.rewindReaderOnError { buffer in
             guard var buffer = buffer.readSlice(length: Int(length) + MemoryLayout<UInt32>.size) else {
                 return nil
             }
 
             var content = try protection.decryptAndVerifyRemainingPacket(&buffer, sequenceNumber: self.sequenceNumber)
+
+            if let d = decompressor {
+                content = try d.decompress(&content, maxOutput: SSHPacketParser.maxDecompressedPacket)
+            }
+
             guard
                 let message = try content.readSSHMessage(
                     clientExpectingKeyboardInteractiveInfoRequest: expectingInfoRequest
