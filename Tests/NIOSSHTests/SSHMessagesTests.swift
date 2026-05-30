@@ -797,4 +797,51 @@ final class SSHMessagesTests: XCTestCase {
 
         try self.assertCorrectlyManagesPartialRead(message)
     }
+
+    func testBreakRequestGoldenVector() {
+        // recipientChannel = 0, want_reply = false, breakLength = 1000ms.
+        // Hand-authored from RFC 4335 (NOT a self-round-trip): the wire-format gate.
+        let message = SSHMessage.ChannelRequestMessage(
+            recipientChannel: 0, type: .breakRequest(1000), wantReply: false
+        )
+        var buffer = ByteBufferAllocator().buffer(capacity: 32)
+        _ = buffer.writeChannelRequestMessage(message)
+        let expected: [UInt8] = [
+            0x00, 0x00, 0x00, 0x00,  // recipient channel = 0
+            0x00, 0x00, 0x00, 0x05,  // string length = 5
+            0x62, 0x72, 0x65, 0x61, 0x6b,  // "break"
+            0x00,  // want_reply = false
+            0x00, 0x00, 0x03, 0xE8,  // break length = 1000
+        ]
+        XCTAssertEqual(Array(buffer.readableBytesView), expected)
+    }
+
+    func testBreakRequestReadsGolden() throws {
+        var buffer = ByteBufferAllocator().buffer(capacity: 32)
+        buffer.writeBytes([
+            0x00, 0x00, 0x00, 0x07,  // recipient channel = 7
+            0x00, 0x00, 0x00, 0x05, 0x62, 0x72, 0x65, 0x61, 0x6b,  // "break"
+            0x01,  // want_reply = true
+            0x00, 0x00, 0x01, 0xF4,  // 500
+        ])
+        let message = try XCTUnwrap(try buffer.readChannelRequestMessage())
+        XCTAssertEqual(message.recipientChannel, 7)
+        XCTAssertEqual(message.wantReply, true)
+        XCTAssertEqual(message.type, .breakRequest(500))
+    }
+
+    func testBreakRequestEventRoundTrip() {
+        let event = SSHChannelRequestEvent.BreakRequest(breakLength: 1000, wantReply: false)
+        let sshMessage = SSHMessage(event, recipientChannel: 3)
+        guard case .channelRequest(let message) = sshMessage else {
+            XCTFail("not a channel request")
+            return
+        }
+        XCTAssertEqual(message.type, .breakRequest(1000))
+        XCTAssertEqual(message.recipientChannel, 3)
+
+        // Inbound direction.
+        let back = SSHChannelRequestEvent.fromMessage(message)
+        XCTAssertEqual((back as? SSHChannelRequestEvent.BreakRequest)?.breakLength, 1000)
+    }
 }

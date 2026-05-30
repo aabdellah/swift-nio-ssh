@@ -310,6 +310,28 @@ public enum SSHChannelRequestEvent: Sendable {
         }
     }
 
+    /// A request to send a BREAK to the remote, per RFC 4335. The break
+    /// length is expressed in milliseconds.
+    public struct BreakRequest: Hashable, Sendable {
+        /// Whether a reply to this request is desired.
+        public var wantReply: Bool
+
+        /// The break duration in milliseconds.
+        public var breakLength: Int { Int(self._breakLength) }
+
+        fileprivate var _breakLength: UInt32
+
+        public init(breakLength: Int, wantReply: Bool = false) {
+            self._breakLength = UInt32(breakLength)
+            self.wantReply = wantReply
+        }
+
+        internal init(breakLength: UInt32, wantReply: Bool) {
+            self._breakLength = breakLength
+            self.wantReply = wantReply
+        }
+    }
+
     /// Request that the server enable agent forwarding for this session
     /// (`auth-agent-req@openssh.com`, i.e. `ssh -A`). Zero-payload request;
     /// fire on the session child channel BEFORE invoking shell/exec. The
@@ -366,6 +388,8 @@ extension SSHChannelRequestEvent {
             return LocalFlowControlRequest(clientCanDo: clientCanDo)
         case .signal(let signalName):
             return SignalRequest(signal: signalName)
+        case .breakRequest(let breakLength):
+            return BreakRequest(breakLength: breakLength, wantReply: message.wantReply)
         case .authAgentReq:
             return AgentForwardingRequest(wantReply: message.wantReply)
         case .unknown:
@@ -497,6 +521,15 @@ extension SSHMessage {
         let message = SSHMessage.ChannelRequestMessage(
             recipientChannel: recipientChannel,
             type: .signal(event.signal),
+            wantReply: event.wantReply
+        )
+        self = .channelRequest(message)
+    }
+
+    init(_ event: SSHChannelRequestEvent.BreakRequest, recipientChannel: UInt32) {
+        let message = SSHMessage.ChannelRequestMessage(
+            recipientChannel: recipientChannel,
+            type: .breakRequest(event._breakLength),
             wantReply: event.wantReply
         )
         self = .channelRequest(message)

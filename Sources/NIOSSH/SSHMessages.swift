@@ -371,6 +371,8 @@ extension SSHMessage {
             case windowChange(WindowChange)
             case xonXoff(Bool)
             case signal(String)
+            /// RFC 4335 `break` channel request; payload = break-length ms.
+            case breakRequest(UInt32)
             /// Outbound `auth-agent-req@openssh.com` (ssh -A). Zero-payload
             /// channel request that asks the server to enable agent forwarding.
             case authAgentReq
@@ -1296,6 +1298,12 @@ extension ByteBuffer {
                     return nil
                 }
                 type = .signal(signalName)
+
+            case "break":
+                guard let breakLength: UInt32 = self.readInteger() else {
+                    return nil
+                }
+                type = .breakRequest(breakLength)
             default:
                 type = .unknown
             }
@@ -1794,6 +1802,8 @@ extension ByteBuffer {
             writtenBytes += self.writeSSHString("xon-xoff".utf8)
         case .signal:
             writtenBytes += self.writeSSHString("signal".utf8)
+        case .breakRequest:
+            writtenBytes += self.writeSSHString("break".utf8)
         case .authAgentReq:
             writtenBytes += self.writeSSHString("auth-agent-req@openssh.com".utf8)
         case .unknown:
@@ -1835,6 +1845,8 @@ extension ByteBuffer {
             writtenBytes += self.writeSSHBoolean(clientCanDo)
         case .signal(let name):
             writtenBytes += self.writeSSHString(name.utf8)
+        case .breakRequest(let breakLength):
+            writtenBytes += self.writeInteger(breakLength)
         case .authAgentReq:
             // Zero-payload — the request name string above is the entire body.
             break
