@@ -596,6 +596,42 @@ class EndToEndTests: XCTestCase {
         XCTAssertTrue(completed.value, "rekey promise resolves on completion")
     }
 
+    func testManualRekeyPromiseFailsWhenHostKeyValidationFailsOnRekey() throws {
+        enum TestError: Error { case rejectedOnRekey }
+        final class FailOnRekeyDelegate: NIOSSHClientServerAuthenticationDelegate {
+            var count = 0
+            func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
+                self.count += 1
+                if self.count == 1 {
+                    validationCompletePromise.succeed(())  // initial handshake: trust
+                } else {
+                    validationCompletePromise.fail(TestError.rejectedOnRekey)  // rekey: reject
+                }
+            }
+        }
+
+        let delegate = FailOnRekeyDelegate()
+        var harness = TestHarness()
+        harness.clientServerAuthDelegate = delegate
+        XCTAssertNoThrow(try self.channel.configureWithHarness(harness))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+        XCTAssertEqual(delegate.count, 1, "initial handshake validated the host key")
+
+        let handler = self.channel.clientSSHHandler!
+        let failed = NIOLoopBoundBox(false, eventLoop: self.channel.client.eventLoop)
+        let promise = self.channel.client.eventLoop.makePromise(of: Void.self)
+        promise.futureResult.whenFailure { _ in failed.value = true }
+
+        // The rekey re-validates the host key, which now fails — the async KEX
+        // future fails. The rekey promise must FAIL (not hang): the .failure
+        // path unblocks pending rekey waiters rather than stranding them.
+        handler.rekey(promise: promise)
+        try? self.channel.interactInMemory()
+        XCTAssertGreaterThan(delegate.count, 1, "rekey re-validated the host key")
+        XCTAssertTrue(failed.value, "rekey promise must fail when host-key validation fails on rekey")
+    }
+
     func testSupportServerInitiatedRekeying() throws {
         XCTAssertNoThrow(try self.channel.configureWithHarness(TestHarness()))
         XCTAssertNoThrow(try self.channel.activate())

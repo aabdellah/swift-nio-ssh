@@ -74,11 +74,11 @@ public final class NIOSSHHandler {
     /// only on the channel's event loop.
     private var pendingRekeyCompletions: [EventLoopPromise<Void>] = []
 
-    /// True while an asynchronous key-exchange computation (a
+    /// True while an asynchronous key-exchange or user-auth computation (a
     /// `possibleFutureMessage`) is outstanding. Inbound processing is paused
     /// while set so the next buffered message — e.g. a rekeying peer's NEWKEYS,
     /// which servers send back-to-back with KEX_ECDH_REPLY — is not consumed
-    /// before we have emitted our own NEWKEYS. Accessed only on the event loop.
+    /// before we have emitted our own response. Accessed only on the event loop.
     private var keyExchangeFutureInFlight = false
 
     /// Test-only observable: the number of client-initiated rekeys this handler has
@@ -277,10 +277,11 @@ extension NIOSSHHandler: ChannelDuplexHandler {
         case .noMessage:
             break
         case .possibleFutureMessage(let future):
-            // The KEX response is computed asynchronously. Suspend inbound
-            // processing (set in the caller's loop guard) until it resolves, so
-            // a rekeying peer's NEWKEYS — which servers send back-to-back with
-            // KEX_ECDH_REPLY — is not consumed before we emit our own NEWKEYS.
+            // A key-exchange or user-auth response is computed asynchronously.
+            // Suspend inbound processing (checked in the caller's loop guard)
+            // until it resolves, so a rekeying peer's NEWKEYS — which servers
+            // send back-to-back with KEX_ECDH_REPLY — is not consumed before we
+            // emit our own NEWKEYS.
             self.keyExchangeFutureInFlight = true
             future.hop(to: context.eventLoop).assumeIsolatedUnsafeUnchecked().whenComplete { result in
                 self.keyExchangeFutureInFlight = false
@@ -288,17 +289,22 @@ extension NIOSSHHandler: ChannelDuplexHandler {
                 case .success(.some(let message)):
                     do {
                         try self.writeMessage(message, context: context)
-                        // Resume the messages buffered behind the KEX (the peer's
-                        // NEWKEYS + any following data), now that ours is queued.
-                        self.drainBufferedInboundMessages(context: context)
                     } catch {
                         context.fireErrorCaught(error)
                     }
                 case .success(.none):
-                    self.drainBufferedInboundMessages(context: context)
+                    break
                 case .failure(let error):
+                    // The computation failed (e.g. a host-key rejection on a
+                    // rekey). Unblock anyone awaiting a manual rekey so they see
+                    // the error rather than hang, then surface it.
+                    self.failPendingRekeyCompletions(error)
                     context.fireErrorCaught(error)
                 }
+                // Resume the inbound pump that was paused while the future was
+                // outstanding (every outcome — a failure must not strand the
+                // buffered peer messages on a surviving channel), then flush.
+                self.drainBufferedInboundMessages(context: context)
                 if self.pendingWrite {
                     self.pendingWrite = false
                     context.flush()
