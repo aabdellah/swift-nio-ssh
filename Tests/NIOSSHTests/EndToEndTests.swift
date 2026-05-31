@@ -574,6 +574,28 @@ class EndToEndTests: XCTestCase {
         }
     }
 
+    func testPublicRekeyPromiseResolvesOnCompletionNotInitiation() throws {
+        XCTAssertNoThrow(try self.channel.configureWithHarness(TestHarness()))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        let handler = self.channel.clientSSHHandler!
+        let completed = NIOLoopBoundBox(false, eventLoop: self.channel.client.eventLoop)
+        let promise = self.channel.client.eventLoop.makePromise(of: Void.self)
+        promise.futureResult.whenSuccess { completed.value = true }
+
+        handler.rekey(promise: promise)
+        // Initiation only: the client has sent KEXINIT but the peer has not
+        // yet responded, so channel data is still forbidden and the promise
+        // must NOT be fulfilled.
+        XCTAssertFalse(completed.value, "rekey promise must not resolve on initiation")
+
+        // Drive the key exchange to completion; the promise resolves once the
+        // connection is rekeyable again (RFC 4253 §7.1 window closed).
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+        XCTAssertTrue(completed.value, "rekey promise resolves on completion")
+    }
+
     func testSupportServerInitiatedRekeying() throws {
         XCTAssertNoThrow(try self.channel.configureWithHarness(TestHarness()))
         XCTAssertNoThrow(try self.channel.activate())

@@ -67,6 +67,20 @@ public final class NIOSSHHandler {
     /// `nil` (the default) means no automatic rekey.
     private var rekeyController: RekeyController?
 
+    /// Promises awaiting *completion* of a manual `rekey()`. RFC 4253 §7.1
+    /// forbids sending channel data between a peer's KEXINIT and its NEWKEYS,
+    /// so the public `rekey()` resolves only once the connection is rekeyable
+    /// again — letting callers wait out the window before writing. Accessed
+    /// only on the channel's event loop.
+    private var pendingRekeyCompletions: [EventLoopPromise<Void>] = []
+
+    /// True while an asynchronous key-exchange computation (a
+    /// `possibleFutureMessage`) is outstanding. Inbound processing is paused
+    /// while set so the next buffered message — e.g. a rekeying peer's NEWKEYS,
+    /// which servers send back-to-back with KEX_ECDH_REPLY — is not consumed
+    /// before we have emitted our own NEWKEYS. Accessed only on the event loop.
+    private var keyExchangeFutureInFlight = false
+
     /// Test-only observable: the number of client-initiated rekeys this handler has
     /// begun (via `initiateRekey`). Used by the hermetic rekey-trigger tests to assert
     /// that a threshold actually fired without sniffing the encrypted KEX_INIT.
@@ -146,6 +160,7 @@ extension NIOSSHHandler: ChannelDuplexHandler {
 
         self.rekeyController?.scheduled?.cancel()
         self.rekeyController?.scheduled = nil
+        self.failPendingRekeyCompletions(ChannelError.eof)
 
         // We don't actually need to nil out the multiplexer here (it will nil its reference to us)
         // but we _can_, and it doesn't hurt.
@@ -180,6 +195,7 @@ extension NIOSSHHandler: ChannelDuplexHandler {
     public func channelInactive(context: ChannelHandlerContext) {
         self.rekeyController?.scheduled?.cancel()
         self.rekeyController?.scheduled = nil
+        self.failPendingRekeyCompletions(ChannelError.eof)
         self.multiplexer?.parentChannelInactive()
     }
 
@@ -190,18 +206,31 @@ extension NIOSSHHandler: ChannelDuplexHandler {
         let inboundByteCount = data.readableBytes
         self.stateMachine.bufferInboundData(&data)
 
+        self.drainBufferedInboundMessages(context: context)
+
+        self.considerRekey(transferredBytes: inboundByteCount, context: context)
+    }
+
+    /// Process buffered inbound messages until the buffer is drained or an
+    /// asynchronous key exchange suspends processing (`keyExchangeFutureInFlight`).
+    /// Re-entered from the KEX future's completion to resume the remainder.
+    private func drainBufferedInboundMessages(context: ChannelHandlerContext) {
         do {
-            while let result = try self.stateMachine.processInboundMessage(
-                allocator: context.channel.allocator,
-                loop: context.eventLoop
-            ) {
+            while !self.keyExchangeFutureInFlight,
+                let result = try self.stateMachine.processInboundMessage(
+                    allocator: context.channel.allocator,
+                    loop: context.eventLoop
+                )
+            {
                 try self.processInboundMessageResult(result, context: context)
             }
         } catch {
             context.fireErrorCaught(error)
         }
 
-        self.considerRekey(transferredBytes: inboundByteCount, context: context)
+        // A completed rekey returns the connection to a rekeyable state; wake
+        // any callers blocked in `rekey()` waiting for the window to close.
+        self.resolveCompletedRekeyWaiters()
     }
 
     public func channelReadComplete(context: ChannelHandlerContext) {
@@ -248,22 +277,31 @@ extension NIOSSHHandler: ChannelDuplexHandler {
         case .noMessage:
             break
         case .possibleFutureMessage(let future):
-            // TODO(cory): This is not right, but for now it's good enough.
+            // The KEX response is computed asynchronously. Suspend inbound
+            // processing (set in the caller's loop guard) until it resolves, so
+            // a rekeying peer's NEWKEYS — which servers send back-to-back with
+            // KEX_ECDH_REPLY — is not consumed before we emit our own NEWKEYS.
+            self.keyExchangeFutureInFlight = true
             future.hop(to: context.eventLoop).assumeIsolatedUnsafeUnchecked().whenComplete { result in
+                self.keyExchangeFutureInFlight = false
                 switch result {
                 case .success(.some(let message)):
                     do {
                         try self.writeMessage(message, context: context)
-                        self.pendingWrite = false
-                        context.flush()
+                        // Resume the messages buffered behind the KEX (the peer's
+                        // NEWKEYS + any following data), now that ours is queued.
+                        self.drainBufferedInboundMessages(context: context)
                     } catch {
                         context.fireErrorCaught(error)
                     }
                 case .success(.none):
-                    // Do nothing
-                    break
+                    self.drainBufferedInboundMessages(context: context)
                 case .failure(let error):
                     context.fireErrorCaught(error)
+                }
+                if self.pendingWrite {
+                    self.pendingWrite = false
+                    context.flush()
                 }
             }
         case .forwardToMultiplexer(let message):
@@ -588,28 +626,52 @@ extension NIOSSHHandler {
         self.initiateRekey(context: self.context!)
     }
 
-    /// Request a client-initiated key re-exchange. Safe to call at any
-    /// time: a no-op (the promise still succeeds) when the connection is
-    /// not currently rekeyable — i.e. mid-handshake or while a rekey is
-    /// already in flight (OpenSSH `~R` coalescing). Must be called on the
-    /// channel's event loop.
+    /// Request a client-initiated key re-exchange. Safe to call at any time:
+    /// when a rekey/handshake is already in flight the request coalesces onto
+    /// it (OpenSSH `~R` semantics). Must be called on the channel's event loop.
     ///
-    /// The promise reflects that the rekey was *initiated*, not that it
-    /// completed: a failure to serialize/send the KEXINIT surfaces via
-    /// `fireErrorCaught` on the pipeline (as for the internal threshold
-    /// rekey), not by failing this promise. The promise fails only when
-    /// there is no live channel context.
+    /// The promise is fulfilled when the rekey **completes** — i.e. the
+    /// connection has returned to a state where channel data may be sent again
+    /// (RFC 4253 §7.1 forbids channel data between KEXINIT and NEWKEYS, so a
+    /// write issued the instant a rekey is *initiated* would be rejected; wait
+    /// on this promise first). The promise fails with `ChannelError.eof` if the
+    /// connection tears down before the rekey completes, or
+    /// `ChannelError.ioOnClosedChannel` if there is no live channel context. A
+    /// failure to serialize/send the KEXINIT surfaces via `fireErrorCaught`.
     public func rekey(promise: EventLoopPromise<Void>? = nil) {
         guard let context = self.context else {
             promise?.fail(ChannelError.ioOnClosedChannel)
             return
         }
-        guard self.stateMachine.canRekey else {
-            promise?.succeed(())  // already handshaking/rekeying — coalesce
-            return
+        // Initiate only if currently rekeyable; otherwise a rekey/handshake is
+        // already in flight and we coalesce onto it. Either way the promise is
+        // fulfilled when the connection next becomes rekeyable (rekey complete)
+        // — see `resolveCompletedRekeyWaiters(_:)`, invoked after inbound
+        // processing — not now, because channel data cannot be sent until then.
+        if self.stateMachine.canRekey {
+            self.initiateRekey(context: context)
         }
-        self.initiateRekey(context: context)
-        promise?.succeed(())
+        if let promise {
+            self.pendingRekeyCompletions.append(promise)
+        }
+    }
+
+    /// Fulfil any promises awaiting completion of a manual rekey once the
+    /// connection is rekeyable again (i.e. the KEXINIT…NEWKEYS window closed).
+    /// Called on the event loop after inbound messages are processed.
+    private func resolveCompletedRekeyWaiters() {
+        guard !self.pendingRekeyCompletions.isEmpty, self.stateMachine.canRekey else { return }
+        let waiters = self.pendingRekeyCompletions
+        self.pendingRekeyCompletions = []
+        for waiter in waiters { waiter.succeed(()) }
+    }
+
+    /// Fail any pending manual-rekey completion promises (connection tearing down).
+    private func failPendingRekeyCompletions(_ error: Error) {
+        guard !self.pendingRekeyCompletions.isEmpty else { return }
+        let waiters = self.pendingRekeyCompletions
+        self.pendingRekeyCompletions = []
+        for waiter in waiters { waiter.fail(error) }
     }
 }
 
