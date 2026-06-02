@@ -716,13 +716,13 @@ extension SSHKeyExchangeStateMachine {
             EllipticCurveKeyExchange<P521.KeyAgreement.PrivateKey>.self,
             EllipticCurveKeyExchange<Curve25519.KeyAgreement.PrivateKey>.self,
         ]
-        // Post-quantum hybrid, advertised LAST (lowest preference): classical curve25519/NIST stay
-        // preferred; this is only auto-selected against a peer offering nothing classical. Gated on
-        // macOS 26 / iOS 26 etc. because swift-crypto re-exports CryptoKit's MLKEM768 on Apple
-        // platforms; below that floor (and as the no-op `*` case, Linux is true) the hybrid is simply
-        // not offered and negotiation falls back to classical — no API break, no crash.
+        // Post-quantum hybrid, advertised FIRST (highest preference), matching OpenSSH 9.9+ default:
+        // a PQ-capable peer negotiates the hybrid; peers without it fall through to the classical
+        // curves. Gated on macOS 26 / iOS 26 etc. because swift-crypto re-exports CryptoKit's
+        // MLKEM768 on Apple platforms; below that floor the hybrid is simply absent (and on Linux the
+        // `*` case is true, so it IS offered) — negotiation then uses classical, no API break.
         if #available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *) {
-            implementations.append(MLKEM768X25519KeyExchange.self)
+            implementations.insert(MLKEM768X25519KeyExchange.self, at: 0)
         }
         return implementations
     }()

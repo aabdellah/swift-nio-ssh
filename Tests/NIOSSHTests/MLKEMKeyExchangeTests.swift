@@ -140,17 +140,17 @@ final class MLKEMKeyExchangeTests: XCTestCase {
 
 /// Registration/negotiation assertions. NOT macOS-26-gated: must verify behavior below the floor too.
 final class MLKEMRegistrationTests: XCTestCase {
-    func testAdvertisedAtLowestPreferenceWhenAvailable() {
+    func testAdvertisedAtHighestPreferenceWhenAvailable() {
         let algs = SSHKeyExchangeStateMachine.supportedKeyExchangeAlgorithms
         // Classical curve25519 is always advertised.
         XCTAssertTrue(algs.contains("curve25519-sha256"))
         if #available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *) {
-            // On PQ-capable platforms the hybrid is advertised, but LAST (lowest preference).
-            XCTAssertEqual(algs.last, "mlkem768x25519-sha256")
-            guard let c = algs.firstIndex(of: "curve25519-sha256"),
-                let m = algs.firstIndex(of: "mlkem768x25519-sha256")
-            else { return XCTFail("expected both curve25519 and mlkem768 present") }
-            XCTAssertLessThan(c, m)
+            // On PQ-capable platforms the hybrid leads the list (highest preference, OpenSSH 9.9+).
+            XCTAssertEqual(algs.first, "mlkem768x25519-sha256")
+            guard let m = algs.firstIndex(of: "mlkem768x25519-sha256"),
+                let c = algs.firstIndex(of: "curve25519-sha256")
+            else { return XCTFail("expected both mlkem768 and curve25519 present") }
+            XCTAssertLessThan(m, c)
         } else {
             // Below the floor the hybrid is not offered at all.
             XCTAssertFalse(algs.contains("mlkem768x25519-sha256"))
