@@ -22,7 +22,7 @@ import FoundationEssentials
 import Foundation
 #endif
 
-/// Hybrid post-quantum key exchange `mlkem768x25519-sha256@openssh.com`.
+/// Hybrid post-quantum key exchange `mlkem768x25519-sha256`.
 ///
 /// Composes ML-KEM-768 (FIPS 203 module-lattice KEM) with X25519 ECDH, per
 /// draft-ietf-sshm-mlkem-hybrid-kex. The client sends `C_INIT = ek ‖ x25519_pub`; the server
@@ -46,7 +46,7 @@ struct MLKEM768X25519KeyExchange: EllipticCurveKeyExchangeProtocol {
     private static let cInitBytes = mlkemEncapsulationKeyBytes + x25519PublicKeyBytes  // 1216
     private static let sReplyBytes = mlkemCiphertextBytes + x25519PublicKeyBytes       // 1120
 
-    static var keyExchangeAlgorithmNames: [Substring] { ["mlkem768x25519-sha256@openssh.com"] }
+    static var keyExchangeAlgorithmNames: [Substring] { ["mlkem768x25519-sha256"] }
 
     private var ourRole: SSHConnectionRole
     private var previousSessionIdentifier: ByteBuffer?
@@ -179,7 +179,7 @@ extension MLKEM768X25519KeyExchange {
         let bytes = secret.withUnsafeBytes { Array($0) }
         let allORed = bytes.reduce(UInt8(0)) { $0 | $1 }
         guard allORed != 0 else {
-            throw NIOSSHError.weakSharedSecret(exchangeAlgorithm: "mlkem768x25519")
+            throw NIOSSHError.weakSharedSecret(exchangeAlgorithm: "mlkem768x25519-sha256")
         }
         return bytes
     }

@@ -146,14 +146,14 @@ final class MLKEMRegistrationTests: XCTestCase {
         XCTAssertTrue(algs.contains("curve25519-sha256"))
         if #available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *) {
             // On PQ-capable platforms the hybrid is advertised, but LAST (lowest preference).
-            XCTAssertEqual(algs.last, "mlkem768x25519-sha256@openssh.com")
+            XCTAssertEqual(algs.last, "mlkem768x25519-sha256")
             guard let c = algs.firstIndex(of: "curve25519-sha256"),
-                let m = algs.firstIndex(of: "mlkem768x25519-sha256@openssh.com")
+                let m = algs.firstIndex(of: "mlkem768x25519-sha256")
             else { return XCTFail("expected both curve25519 and mlkem768 present") }
             XCTAssertLessThan(c, m)
         } else {
             // Below the floor the hybrid is not offered at all.
-            XCTAssertFalse(algs.contains("mlkem768x25519-sha256@openssh.com"))
+            XCTAssertFalse(algs.contains("mlkem768x25519-sha256"))
         }
     }
 }
