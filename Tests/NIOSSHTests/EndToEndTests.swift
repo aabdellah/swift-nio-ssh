@@ -416,6 +416,103 @@ class EndToEndTests: XCTestCase {
         XCTAssertNil(try secondReply.futureResult.wait())
     }
 
+    func testInboundUnknownGlobalRequestReachesDelegate() throws {
+        // An inbound unknown global request (e.g. `hostkeys-00@openssh.com`, which uses
+        // wantReply == false) must be delivered to the client's global request delegate with its
+        // name and payload intact, and must NOT produce a REQUEST_FAILURE on the wire.
+        final class CapturingDelegate: GlobalRequestDelegate {
+            var captured: [(name: String, data: [UInt8], wantReply: Bool)] = []
+
+            func unknownGlobalRequest(
+                _ name: String,
+                data: ByteBuffer,
+                handler: NIOSSHHandler,
+                wantReply: Bool,
+                promise: EventLoopPromise<ByteBuffer?>?
+            ) {
+                self.captured.append((name: name, data: Array(data.readableBytesView), wantReply: wantReply))
+                // wantReply == false here: promise is nil. Nothing to fulfil.
+                promise?.succeed(nil)
+            }
+        }
+
+        let delegate = CapturingDelegate()
+        var harness = TestHarness()
+        harness.clientGlobalRequestDelegate = delegate
+
+        XCTAssertNoThrow(try self.channel.configureWithHarness(harness))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        // The server sends an unknown, no-reply global request to the client.
+        let serverSSHHandler = self.channel.serverSSHHandler!
+        var payload = self.channel.server.allocator.buffer(capacity: 4)
+        payload.writeBytes([0xDE, 0xAD, 0xBE, 0xEF])
+
+        serverSSHHandler.sendGlobalRequestMessage(
+            .init(wantReply: false, type: .unknown("hostkeys-00@openssh.com", payload)),
+            promise: nil
+        )
+
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        // The delegate observed the request, name + payload intact, wantReply == false.
+        XCTAssertEqual(delegate.captured.count, 1)
+        XCTAssertEqual(delegate.captured.first?.name, "hostkeys-00@openssh.com")
+        XCTAssertEqual(delegate.captured.first?.data, [0xDE, 0xAD, 0xBE, 0xEF])
+        XCTAssertEqual(delegate.captured.first?.wantReply, false)
+
+        // No REQUEST_FAILURE may have been sent back: if the client had spuriously replied, the
+        // server would have no pending response promise and would error, tripping the clean-finish
+        // assertion in tearDown. Confirm there is no further outbound traffic from the client.
+        XCTAssertNil(try self.channel.client.readOutbound(as: IOData.self))
+    }
+
+    func testInboundUnknownGlobalRequestWithReplyRoundTrips() throws {
+        // When wantReply == true, a delegate that succeeds the promise with a buffer must produce a
+        // REQUEST_SUCCESS reply carrying that buffer back to the requester.
+        final class ReplyingDelegate: GlobalRequestDelegate {
+            var capturedName: String?
+
+            func unknownGlobalRequest(
+                _ name: String,
+                data: ByteBuffer,
+                handler: NIOSSHHandler,
+                wantReply: Bool,
+                promise: EventLoopPromise<ByteBuffer?>?
+            ) {
+                self.capturedName = name
+                var reply = handler.channel?.allocator.buffer(capacity: 3) ?? ByteBufferAllocator().buffer(capacity: 3)
+                reply.writeBytes([0x01, 0x02, 0x03])
+                promise?.succeed(reply)
+            }
+        }
+
+        let delegate = ReplyingDelegate()
+        var harness = TestHarness()
+        harness.serverGlobalRequestDelegate = delegate
+
+        XCTAssertNoThrow(try self.channel.configureWithHarness(harness))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        let clientSSHHandler = self.channel.clientSSHHandler!
+        var payload = self.channel.client.allocator.buffer(capacity: 2)
+        payload.writeBytes([0xAA, 0xBB])
+
+        let reply = self.channel.client.eventLoop.makePromise(of: ByteBuffer?.self)
+        clientSSHHandler.sendGlobalRequestMessage(
+            .init(wantReply: true, type: .unknown("hostkeys-prove-00@openssh.com", payload)),
+            promise: reply
+        )
+
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        XCTAssertEqual(delegate.capturedName, "hostkeys-prove-00@openssh.com")
+        let replyBuffer = try reply.futureResult.wait()
+        XCTAssertEqual(replyBuffer.map { Array($0.readableBytesView) }, [0x01, 0x02, 0x03])
+    }
+
     func testGlobalRequestTooEarlyIsDelayed() throws {
         let completed = NIOLoopBoundBox(false, eventLoop: self.channel.client.eventLoop)
         let promise = self.channel.client.eventLoop.makePromise(of: GlobalRequest.TCPForwardingResponse?.self)

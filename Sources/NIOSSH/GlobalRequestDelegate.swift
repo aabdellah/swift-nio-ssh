@@ -32,6 +32,27 @@ public protocol GlobalRequestDelegate {
         handler: NIOSSHHandler,
         promise: EventLoopPromise<GlobalRequest.TCPForwardingResponse>
     )
+
+    /// An inbound connection-level global request with an unrecognised name (for example a protocol
+    /// extension such as `hostkeys-00@openssh.com`).
+    ///
+    /// The default implementation rejects the request — when `wantReply` is `true` this results in a
+    /// `SSH_MSG_REQUEST_FAILURE` being sent — preserving the historical behavior of dropping unknown
+    /// global requests. Override this method to observe extension global requests.
+    ///
+    /// For `wantReply == false` requests the `promise` is `nil` and any response is ignored. When
+    /// `wantReply == true`, succeed the `promise` with the body of the `SSH_MSG_REQUEST_SUCCESS`
+    /// reply (an empty buffer is permitted), or fail it to send `SSH_MSG_REQUEST_FAILURE`.
+    ///
+    /// The eventLoop associated with the promise (if any) is the same as the one used to create the
+    /// handler.
+    func unknownGlobalRequest(
+        _ name: String,
+        data: ByteBuffer,
+        handler: NIOSSHHandler,
+        wantReply: Bool,
+        promise: EventLoopPromise<ByteBuffer?>?
+    )
 }
 
 extension GlobalRequestDelegate {
@@ -42,6 +63,18 @@ extension GlobalRequestDelegate {
     ) {
         // The default implementation rejects all requests.
         promise.fail(NIOSSHError.unsupportedGlobalRequest)
+    }
+
+    public func unknownGlobalRequest(
+        _ name: String,
+        data: ByteBuffer,
+        handler: NIOSSHHandler,
+        wantReply: Bool,
+        promise: EventLoopPromise<ByteBuffer?>?
+    ) {
+        // The default implementation rejects unknown global requests, preserving the historical
+        // behavior (`SSH_MSG_REQUEST_FAILURE` when a reply was wanted).
+        promise?.fail(NIOSSHError.unsupportedGlobalRequest)
     }
 }
 

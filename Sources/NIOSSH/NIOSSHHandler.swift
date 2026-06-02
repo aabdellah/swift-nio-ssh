@@ -435,11 +435,58 @@ extension NIOSSHHandler {
         let responsePromise: EventLoopPromise<GlobalRequest.TCPForwardingResponse>
 
         switch message.type {
-        case .unknown:
-            if message.wantReply {
-                // There's no way to tell what message this is and how to respond from here.
-                // The only reasonable solution is to reply `SSH_MSG_REQUEST_FAILURE`
-                try self.writeMessage(.init(.requestFailure), context: context)
+        case .unknown(let name, let payload):
+            // Unknown global requests are delivered to the global request delegate, which may observe
+            // protocol extensions (for example `hostkeys-00@openssh.com`). The default delegate
+            // rejects them, preserving the historical `SSH_MSG_REQUEST_FAILURE` behavior. This arm is
+            // self-contained and returns early without touching `responsePromise`, which is only used
+            // by the TCP-forwarding arms below.
+            let unknownPromise: EventLoopPromise<ByteBuffer?>? =
+                message.wantReply ? context.eventLoop.makePromise() : nil
+
+            if let unknownPromise {
+                // The promise is created a few lines above on the context's event loop, so this is safe.
+                unknownPromise.futureResult.assumeIsolatedUnsafeUnchecked().whenComplete { result in
+                    do {
+                        switch result {
+                        case .success(let buffer):
+                            let body = buffer ?? context.channel.allocator.buffer(capacity: 0)
+                            try self.writeMessage(
+                                .init(
+                                    .requestSuccess(
+                                        .init(.unknown(body), allocator: context.channel.allocator)
+                                    )
+                                ),
+                                context: context
+                            )
+                            context.flush()
+                        case .failure:
+                            try self.writeMessage(.init(.requestFailure), context: context)
+                            context.flush()
+                        }
+                    } catch {
+                        context.fireErrorCaught(error)
+                    }
+                }
+            }
+
+            switch self.stateMachine.role {
+            case .client(let config):
+                config.globalRequestDelegate.unknownGlobalRequest(
+                    name,
+                    data: payload,
+                    handler: self,
+                    wantReply: message.wantReply,
+                    promise: unknownPromise
+                )
+            case .server(let config):
+                config.globalRequestDelegate.unknownGlobalRequest(
+                    name,
+                    data: payload,
+                    handler: self,
+                    wantReply: message.wantReply,
+                    promise: unknownPromise
+                )
             }
             return
         case .tcpipForward(let host, let port):
