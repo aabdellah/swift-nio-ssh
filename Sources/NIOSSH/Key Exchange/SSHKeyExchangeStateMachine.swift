@@ -709,12 +709,23 @@ struct SSHKeyExchangeStateMachine {
 
 extension SSHKeyExchangeStateMachine {
     // For now this is a static list.
-    static let supportedKeyExchangeImplementations: [EllipticCurveKeyExchangeProtocol.Type] = [
-        EllipticCurveKeyExchange<P384.KeyAgreement.PrivateKey>.self,
-        EllipticCurveKeyExchange<P256.KeyAgreement.PrivateKey>.self,
-        EllipticCurveKeyExchange<P521.KeyAgreement.PrivateKey>.self,
-        EllipticCurveKeyExchange<Curve25519.KeyAgreement.PrivateKey>.self,
-    ]
+    static let supportedKeyExchangeImplementations: [EllipticCurveKeyExchangeProtocol.Type] = {
+        var implementations: [EllipticCurveKeyExchangeProtocol.Type] = [
+            EllipticCurveKeyExchange<P384.KeyAgreement.PrivateKey>.self,
+            EllipticCurveKeyExchange<P256.KeyAgreement.PrivateKey>.self,
+            EllipticCurveKeyExchange<P521.KeyAgreement.PrivateKey>.self,
+            EllipticCurveKeyExchange<Curve25519.KeyAgreement.PrivateKey>.self,
+        ]
+        // Post-quantum hybrid, advertised LAST (lowest preference): classical curve25519/NIST stay
+        // preferred; this is only auto-selected against a peer offering nothing classical. Gated on
+        // macOS 26 / iOS 26 etc. because swift-crypto re-exports CryptoKit's MLKEM768 on Apple
+        // platforms; below that floor (and as the no-op `*` case, Linux is true) the hybrid is simply
+        // not offered and negotiation falls back to classical — no API break, no crash.
+        if #available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+            implementations.append(MLKEM768X25519KeyExchange.self)
+        }
+        return implementations
+    }()
 
     static let supportedKeyExchangeAlgorithms: [Substring] = supportedKeyExchangeImplementations.flatMap {
         $0.keyExchangeAlgorithmNames
