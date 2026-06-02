@@ -1,0 +1,92 @@
+//===----------------------------------------------------------------------===//
+//
+// This source file is part of the SwiftNIO open source project
+//
+// Copyright (c) 2026 Apple Inc. and the SwiftNIO project authors
+// Licensed under Apache License v2.0
+//
+// See LICENSE.txt for license information
+// See CONTRIBUTORS.txt for the list of SwiftNIO project authors
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+//===----------------------------------------------------------------------===//
+
+import Crypto
+import NIOCore
+import XCTest
+
+@testable import NIOSSH
+
+@available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+final class MLKEMKeyExchangeTests: XCTestCase {
+    private func keyExchangeAgreed(_ first: KeyExchangeResult, _ second: KeyExchangeResult) {
+        XCTAssertEqual(first.sessionID, second.sessionID)
+        XCTAssertEqual(first.keys.initialInboundIV, second.keys.initialOutboundIV)
+        XCTAssertEqual(first.keys.initialOutboundIV, second.keys.initialInboundIV)
+        XCTAssertEqual(first.keys.inboundEncryptionKey, second.keys.outboundEncryptionKey)
+        XCTAssertEqual(first.keys.outboundEncryptionKey, second.keys.inboundEncryptionKey)
+        XCTAssertEqual(first.keys.inboundMACKey, second.keys.outboundMACKey)
+        XCTAssertEqual(first.keys.outboundMACKey, second.keys.inboundMACKey)
+    }
+
+    private func runHandshake(previousSessionIdentifier: ByteBuffer?) throws {
+        var server = MLKEM768X25519KeyExchange(
+            ourRole: .server([.init(ed25519Key: .init())]),
+            previousSessionIdentifier: previousSessionIdentifier
+        )
+        var client = MLKEM768X25519KeyExchange(
+            ourRole: .client,
+            previousSessionIdentifier: previousSessionIdentifier
+        )
+        let serverHostKey = NIOSSHPrivateKey(ed25519Key: .init())
+
+        var initialExchangeBytes = ByteBufferAllocator().buffer(capacity: 2048)
+        let clientMessage = client.initiateKeyExchangeClientSide(allocator: ByteBufferAllocator())
+        // C_INIT = ek(1184) ‖ x25519(32) = 1216 bytes.
+        XCTAssertEqual(clientMessage.publicKey.readableBytes, 1216)
+
+        let (serverKeys, serverResponse) = try assertNoThrowWithValue(
+            try server.completeKeyExchangeServerSide(
+                clientKeyExchangeMessage: clientMessage,
+                serverHostKey: serverHostKey,
+                initialExchangeBytes: &initialExchangeBytes,
+                allocator: ByteBufferAllocator(),
+                expectedKeySizes: AES128GCMOpenSSHTransportProtection.keySizes
+            )
+        )
+        // S_REPLY = ct(1088) ‖ x25519(32) = 1120 bytes.
+        XCTAssertEqual(serverResponse.publicKey.readableBytes, 1120)
+
+        initialExchangeBytes.clear()
+        let clientKeys = try assertNoThrowWithValue(
+            try client.receiveServerKeyExchangePayload(
+                serverKeyExchangeMessage: serverResponse,
+                initialExchangeBytes: &initialExchangeBytes,
+                allocator: ByteBufferAllocator(),
+                expectedKeySizes: AES128GCMOpenSSHTransportProtection.keySizes
+            )
+        )
+        self.keyExchangeAgreed(serverKeys, clientKeys)
+    }
+
+    func testAgreementNoPreviousSession() throws {
+        try self.runHandshake(previousSessionIdentifier: nil)
+    }
+}
+
+/// Mirrors the helper in ECKeyExchangeTests for constructing roles.
+extension SSHConnectionRole {
+    fileprivate static func server(_ hostKeys: [NIOSSHPrivateKey]) -> SSHConnectionRole {
+        .server(SSHServerConfiguration(hostKeys: hostKeys, userAuthDelegate: DenyAllServerAuthDelegate()))
+    }
+
+    fileprivate static var client: SSHConnectionRole {
+        .client(
+            SSHClientConfiguration(
+                userAuthDelegate: ExplodingAuthDelegate(),
+                serverAuthDelegate: AcceptAllHostKeysDelegate()
+            )
+        )
+    }
+}
