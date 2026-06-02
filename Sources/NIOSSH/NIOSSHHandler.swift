@@ -421,8 +421,10 @@ extension NIOSSHHandler {
         self.sendGlobalRequestMessage(message, promise: promise)
     }
 
-    /// The connection's session identifier (the first exchange hash), available once the initial key
-    /// exchange has completed. `nil` before the connection is active.
+    /// The connection's session identifier (the first exchange hash). Non-`nil` only once the
+    /// connection has reached the active state (after key exchange *and* user authentication, and
+    /// while rekeying); `nil` before then. Intended for post-authentication use such as building
+    /// `hostkeys-prove-00@openssh.com` proofs.
     public var sessionIdentifier: ByteBuffer? {
         self.stateMachine.sessionIdentifier
     }
