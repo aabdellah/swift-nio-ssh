@@ -73,6 +73,69 @@ final class MLKEMKeyExchangeTests: XCTestCase {
     func testAgreementNoPreviousSession() throws {
         try self.runHandshake(previousSessionIdentifier: nil)
     }
+
+    func testAgreementWithPreviousSession() throws {
+        var previous = ByteBufferAllocator().buffer(capacity: 64)
+        previous.writeBytes(0..<32)
+        try self.runHandshake(previousSessionIdentifier: previous)
+    }
+
+    func testServerRejectsWrongLengthCInit() throws {
+        var server = MLKEM768X25519KeyExchange(
+            ourRole: .server([.init(ed25519Key: .init())]),
+            previousSessionIdentifier: nil
+        )
+        let serverHostKey = NIOSSHPrivateKey(ed25519Key: .init())
+        var initialExchangeBytes = ByteBufferAllocator().buffer(capacity: 2048)
+        var shortBuffer = ByteBufferAllocator().buffer(capacity: 1215)
+        shortBuffer.writeBytes(Array(repeating: UInt8(0), count: 1215))
+        let badMessage = SSHMessage.KeyExchangeECDHInitMessage(publicKey: shortBuffer)
+        XCTAssertThrowsError(
+            try server.completeKeyExchangeServerSide(
+                clientKeyExchangeMessage: badMessage,
+                serverHostKey: serverHostKey,
+                initialExchangeBytes: &initialExchangeBytes,
+                allocator: ByteBufferAllocator(),
+                expectedKeySizes: AES128GCMOpenSSHTransportProtection.keySizes
+            )
+        ) { error in
+            XCTAssertEqual((error as? NIOSSHError).map { $0.type }, .invalidKeySize)
+        }
+    }
+
+    func testClientRejectsTamperedSignature() throws {
+        var server = MLKEM768X25519KeyExchange(
+            ourRole: .server([.init(ed25519Key: .init())]),
+            previousSessionIdentifier: nil
+        )
+        var client = MLKEM768X25519KeyExchange(ourRole: .client, previousSessionIdentifier: nil)
+        let serverHostKey = NIOSSHPrivateKey(ed25519Key: .init())
+        var initialExchangeBytes = ByteBufferAllocator().buffer(capacity: 2048)
+        let clientMessage = client.initiateKeyExchangeClientSide(allocator: ByteBufferAllocator())
+        var (_, serverResponse) = try assertNoThrowWithValue(
+            try server.completeKeyExchangeServerSide(
+                clientKeyExchangeMessage: clientMessage,
+                serverHostKey: serverHostKey,
+                initialExchangeBytes: &initialExchangeBytes,
+                allocator: ByteBufferAllocator(),
+                expectedKeySizes: AES128GCMOpenSSHTransportProtection.keySizes
+            )
+        )
+        initialExchangeBytes.clear()
+        serverResponse.signature = try assertNoThrowWithValue(
+            serverHostKey.sign(digest: SHA256.hash(data: [9, 9, 9, 9]))
+        )
+        XCTAssertThrowsError(
+            try client.receiveServerKeyExchangePayload(
+                serverKeyExchangeMessage: serverResponse,
+                initialExchangeBytes: &initialExchangeBytes,
+                allocator: ByteBufferAllocator(),
+                expectedKeySizes: AES128GCMOpenSSHTransportProtection.keySizes
+            )
+        ) { error in
+            XCTAssertEqual((error as? NIOSSHError).map { $0.type }, .invalidExchangeHashSignature)
+        }
+    }
 }
 
 /// Registration/negotiation assertions. NOT macOS-26-gated: must verify behavior below the floor too.
