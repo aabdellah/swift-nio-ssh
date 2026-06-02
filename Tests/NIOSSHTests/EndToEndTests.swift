@@ -513,6 +513,68 @@ class EndToEndTests: XCTestCase {
         XCTAssertEqual(replyBuffer.map { Array($0.readableBytesView) }, [0x01, 0x02, 0x03])
     }
 
+    func testPublicSendGlobalRequestRoundTripsReply() throws {
+        // The public `sendGlobalRequest(name:data:wantReply:promise:)` wrapper must round-trip a
+        // REQUEST_SUCCESS reply buffer from a server-side delegate.
+        final class EchoingDelegate: GlobalRequestDelegate {
+            func unknownGlobalRequest(
+                _ name: String,
+                data: ByteBuffer,
+                handler: NIOSSHHandler,
+                wantReply: Bool,
+                promise: EventLoopPromise<ByteBuffer?>?
+            ) {
+                // Reply with a known sentinel buffer.
+                var reply = ByteBufferAllocator().buffer(capacity: 4)
+                reply.writeBytes([0xCA, 0xFE, 0xBA, 0xBE])
+                promise?.succeed(reply)
+            }
+        }
+
+        var harness = TestHarness()
+        harness.serverGlobalRequestDelegate = EchoingDelegate()
+
+        XCTAssertNoThrow(try self.channel.configureWithHarness(harness))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        let clientSSHHandler = self.channel.clientSSHHandler!
+        var payload = self.channel.client.allocator.buffer(capacity: 2)
+        payload.writeBytes([0x11, 0x22])
+
+        let reply = self.channel.client.eventLoop.makePromise(of: ByteBuffer?.self)
+        clientSSHHandler.sendGlobalRequest(
+            name: "hostkeys-prove-00@openssh.com",
+            data: payload,
+            wantReply: true,
+            promise: reply
+        )
+
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        let replyBuffer = try reply.futureResult.wait()
+        XCTAssertEqual(replyBuffer.map { Array($0.readableBytesView) }, [0xCA, 0xFE, 0xBA, 0xBE])
+
+        // The session identifier is available post-handshake on both ends and matches the peer.
+        let clientSessionID = clientSSHHandler.sessionIdentifier
+        let serverSessionID = self.channel.serverSSHHandler!.sessionIdentifier
+        XCTAssertNotNil(clientSessionID)
+        XCTAssertNotNil(serverSessionID)
+        XCTAssertEqual(clientSessionID, serverSessionID)
+    }
+
+    func testSessionIdentifierIsNilBeforeActive() throws {
+        // Before the connection is active, `sessionIdentifier` is nil.
+        XCTAssertNoThrow(try self.channel.configureWithHarness(TestHarness()))
+        XCTAssertNil(self.channel.clientSSHHandler?.sessionIdentifier)
+
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        // After the handshake completes it is non-nil.
+        XCTAssertNotNil(self.channel.clientSSHHandler?.sessionIdentifier)
+    }
+
     func testGlobalRequestTooEarlyIsDelayed() throws {
         let completed = NIOLoopBoundBox(false, eventLoop: self.channel.client.eventLoop)
         let promise = self.channel.client.eventLoop.makePromise(of: GlobalRequest.TCPForwardingResponse?.self)

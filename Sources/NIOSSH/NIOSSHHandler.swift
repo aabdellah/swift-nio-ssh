@@ -396,6 +396,37 @@ extension NIOSSHHandler {
         self.sendGlobalRequestsIfPossible()
     }
 
+    /// Send a connection-level global request of arbitrary name and payload, optionally awaiting a reply.
+    ///
+    /// This can be used to extend the protocol with custom or non-standard global requests (for example
+    /// `hostkeys-prove-00@openssh.com`). When `wantReply` is `true`, the `promise` is fulfilled with the
+    /// body of the `SSH_MSG_REQUEST_SUCCESS` reply (or failed if the peer responds with
+    /// `SSH_MSG_REQUEST_FAILURE`). When `wantReply` is `false`, the `promise` succeeds with `nil` once the
+    /// request has been written.
+    ///
+    /// This function is **not** thread-safe: it may only be called from on the channel.
+    ///
+    /// - parameters:
+    ///     - name: The global request name.
+    ///     - data: The request-specific payload.
+    ///     - wantReply: Whether a reply is requested from the peer.
+    ///     - promise: An `EventLoopPromise` fulfilled with the reply body (or `nil` for no-reply requests).
+    public func sendGlobalRequest(
+        name: String,
+        data: ByteBuffer,
+        wantReply: Bool,
+        promise: EventLoopPromise<ByteBuffer?>? = nil
+    ) {
+        let message = SSHMessage.GlobalRequestMessage(wantReply: wantReply, type: .unknown(name, data))
+        self.sendGlobalRequestMessage(message, promise: promise)
+    }
+
+    /// The connection's session identifier (the first exchange hash), available once the initial key
+    /// exchange has completed. `nil` before the connection is active.
+    public var sessionIdentifier: ByteBuffer? {
+        self.stateMachine.sessionIdentifier
+    }
+
     fileprivate func dropAllPendingGlobalRequests(_ error: Error) {
         while let next = self.pendingGlobalRequests.popFirst() {
             next.1?.fail(error)

@@ -1406,6 +1406,29 @@ extension SSHConnectionStateMachine {
         return false
     }
 
+    /// The connection's session identifier (the first exchange hash), available once the initial key
+    /// exchange has completed and the connection is active (including while rekeying). `nil` before the
+    /// connection reaches the active state.
+    var sessionIdentifier: ByteBuffer? {
+        switch self.state {
+        case .active(let state):
+            return state.sessionIdentifier
+        case .receivedKexInitWhenActive(let state):
+            return state.sessionIdentifier
+        case .sentKexInitWhenActive(let state):
+            return state.sessionIdentitifier
+        case .rekeying(let state):
+            return state.sessionIdentifier
+        case .rekeyingReceivedNewKeysState(let state):
+            return state.sessionIdentifier
+        case .rekeyingSentNewKeysState(let state):
+            return state.sessionIdentifier
+        case .idle, .sentVersion, .keyExchange, .sentNewKeys, .receivedNewKeys,
+            .userAuthentication, .receivedDisconnect, .sentDisconnect:
+            return nil
+        }
+    }
+
     var role: SSHConnectionRole {
         switch self.state {
         case .idle(let state):
