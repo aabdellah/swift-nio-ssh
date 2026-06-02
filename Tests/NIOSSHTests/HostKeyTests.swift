@@ -189,6 +189,41 @@ final class HostKeyTests: XCTestCase {
         XCTAssertNil(parsed)
     }
 
+    /// A crafted ECDSA signature whose `r`/`s` integer is longer than the curve point size must be
+    /// REJECTED with a thrown error, never crash the process. Before the length guard in
+    /// `ECDSASignatureHelper`, an over-length `r`/`s` produced a negative storage offset and a fatal
+    /// range trap — uncatchable by `try`, and reachable from untrusted input via the public
+    /// `NIOSSHSignature(buffer:)` (e.g. a `hostkeys-prove-00@openssh.com` reply from a malicious server).
+    func testPublicSignatureParseRejectsOverLengthECDSAInsteadOfTrapping() throws {
+        func sshString(_ bytes: [UInt8]) -> [UInt8] {
+            let len = UInt32(bytes.count)
+            return [
+                UInt8(truncatingIfNeeded: len >> 24), UInt8(truncatingIfNeeded: len >> 16),
+                UInt8(truncatingIfNeeded: len >> 8), UInt8(truncatingIfNeeded: len),
+            ] + bytes
+        }
+        // (algorithm id, curve point size). The crafted `r` is pointSize+8 bytes with the high bit
+        // clear (no leading zero for mpIntView to strip), so its length stays above the point size.
+        let cases: [(String, Int)] = [
+            ("ecdsa-sha2-nistp256", 32),
+            ("ecdsa-sha2-nistp384", 48),
+            ("ecdsa-sha2-nistp521", 66),
+        ]
+        for (algorithm, pointSize) in cases {
+            let rOver = [UInt8](repeating: 0x7f, count: pointSize + 8)
+            let sOk = [UInt8](repeating: 0x7f, count: pointSize)
+            let inner = sshString(rOver) + sshString(sOk)
+            let wire = sshString(Array(algorithm.utf8)) + sshString(inner)
+            var buffer = ByteBuffer(bytes: wire)
+            XCTAssertThrowsError(
+                try NIOSSHSignature(buffer: &buffer),
+                "\(algorithm): over-length r must throw, not trap"
+            ) { error in
+                XCTAssertTrue(error is NIOSSHError, "\(algorithm): expected NIOSSHError, got \(error)")
+            }
+        }
+    }
+
     func testEd25519FailsVerificationWithDifferentKeys() throws {
         let edKey = Curve25519.Signing.PrivateKey()
         let sshKey = NIOSSHPrivateKey(ed25519Key: edKey)
