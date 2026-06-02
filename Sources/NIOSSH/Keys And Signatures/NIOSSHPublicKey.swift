@@ -129,7 +129,17 @@ extension NIOSSHPublicKey {
         }
     }
 
-    internal func isValidSignature(_ signature: NIOSSHSignature, for bytes: ByteBuffer) -> Bool {
+    /// Verify a signature over a raw block of bytes.
+    ///
+    /// This verifies that `signature` is a valid signature, made by the private key corresponding to
+    /// this public key, over the bytes in `bytes`. This is the low-level verification primitive used,
+    /// for example, when verifying `hostkeys-prove-00@openssh.com` proofs.
+    ///
+    /// - parameters:
+    ///     - signature: The signature to verify.
+    ///     - bytes: The data the signature is expected to cover.
+    /// - returns: `true` if the signature is valid for this key and data, `false` otherwise.
+    public func isValidSignature(_ signature: NIOSSHSignature, for bytes: ByteBuffer) -> Bool {
         switch (self.backingKey, signature.backingSignature) {
         case (.ed25519(let key), .ed25519(.byteBuffer(let buf))):
             return key.isValidSignature(buf.readableBytesView, for: bytes.readableBytesView)

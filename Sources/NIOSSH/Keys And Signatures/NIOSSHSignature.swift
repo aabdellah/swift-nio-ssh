@@ -28,6 +28,25 @@ public struct NIOSSHSignature: Hashable, Sendable {
     internal init(backingSignature: BackingSignature) {
         self.backingSignature = backingSignature
     }
+
+    /// Parse a single SSH wire-format signature from `buffer`, advancing its reader index past the
+    /// consumed bytes.
+    ///
+    /// The expected encoding is the standard SSH signature blob: an SSH string holding the signature
+    /// format identifier (for example `ssh-ed25519`), followed by the algorithm-specific signature
+    /// bytes. This is the encoding carried inside each `string signature` element of an
+    /// `SSH_MSG_REQUEST_SUCCESS` reply (such as a `hostkeys-prove-00@openssh.com` proof).
+    ///
+    /// - parameter buffer: The buffer to read the signature from. On success its reader index is
+    ///     advanced; on a `nil` return (incomplete signature) the reader index is left unchanged.
+    /// - returns: `nil` if `buffer` does not contain a complete signature.
+    /// - throws: ``NIOSSHError`` if the buffer contains a malformed or unsupported signature.
+    public init?(buffer: inout ByteBuffer) throws {
+        guard let signature = try buffer.readSSHSignature() else {
+            return nil
+        }
+        self = signature
+    }
 }
 
 // swift-format-ignore: DontRepeatTypeInStaticProperties
