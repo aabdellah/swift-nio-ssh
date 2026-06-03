@@ -1901,6 +1901,8 @@ final class ChildChannelMultiplexerTests: XCTestCase {
                     originatorAddress: try! .init(ipAddress: "fe80::1", port: 70)
                 )
             ),
+            SSHChannelType.directStreamLocal(.init(socketPath: "/tmp/direct.sock")),
+            SSHChannelType.forwardedStreamLocal(.init(socketPath: "/tmp/fwd.sock")),
         ]
 
         for channelType in channelTypes {
@@ -1948,6 +1950,8 @@ final class ChildChannelMultiplexerTests: XCTestCase {
                     originatorAddress: try! .init(ipAddress: "fe80::1", port: 70)
                 )
             ),
+            SSHChannelType.directStreamLocal(.init(socketPath: "/tmp/direct.sock")),
+            SSHChannelType.forwardedStreamLocal(.init(socketPath: "/tmp/fwd.sock")),
         ]
 
         for (channelID, channelType) in channelTypes.enumerated() {

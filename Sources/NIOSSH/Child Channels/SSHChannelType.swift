@@ -36,6 +36,14 @@ public enum SSHChannelType: Equatable, Sendable {
     /// "Forwarded TCP/IP" is a connection that was accepted from a listening socket and is being forwarded to the client.
     case forwardedTCPIP(ForwardedTCPIP)
 
+    /// "Direct streamlocal" (`direct-streamlocal@openssh.com`) is a request from the client to the
+    /// server to open an outbound connection to a UNIX-domain socket on the server.
+    case directStreamLocal(DirectStreamLocal)
+
+    /// "Forwarded streamlocal" (`forwarded-streamlocal@openssh.com`) is a connection accepted from a
+    /// server-side UNIX-domain socket that the client previously requested, forwarded to the client.
+    case forwardedStreamLocal(ForwardedStreamLocal)
+
     /// An unknown or extension-defined channel type.
     ///
     /// Used for server-initiated channels with non-standard type names, such as
@@ -115,6 +123,32 @@ extension SSHChannelType {
 }
 
 extension SSHChannelType {
+    /// ``SSHChannelType/DirectStreamLocal`` is a request from the client to the server to open an
+    /// outbound connection to a UNIX-domain socket on the server.
+    public struct DirectStreamLocal: Equatable, Sendable {
+        /// The path of the UNIX-domain socket on the server to connect to.
+        public var socketPath: String
+
+        public init(socketPath: String) {
+            self.socketPath = socketPath
+        }
+    }
+}
+
+extension SSHChannelType {
+    /// ``SSHChannelType/ForwardedStreamLocal`` is a connection that was accepted from a server-side
+    /// UNIX-domain socket the client previously requested, and is being forwarded to the client.
+    public struct ForwardedStreamLocal: Equatable, Sendable {
+        /// The path of the server-side UNIX-domain socket that was connected to.
+        public var socketPath: String
+
+        public init(socketPath: String) {
+            self.socketPath = socketPath
+        }
+    }
+}
+
+extension SSHChannelType {
     internal init(_ message: SSHMessage.ChannelOpenMessage) {
         switch message.type {
         case .session:
@@ -135,6 +169,10 @@ extension SSHChannelType {
                     originatorAddress: message.originatorAddress
                 )
             )
+        case .directStreamLocal(let message):
+            self = .directStreamLocal(.init(socketPath: message.socketPath))
+        case .forwardedStreamLocal(let message):
+            self = .forwardedStreamLocal(.init(socketPath: message.socketPath))
         case .unknown(let name):
             self = .unknown(name)
         }
@@ -162,6 +200,10 @@ extension SSHMessage.ChannelOpenMessage.ChannelType {
                     originatorAddress: data.originatorAddress
                 )
             )
+        case .directStreamLocal(let data):
+            self = .directStreamLocal(.init(socketPath: data.socketPath))
+        case .forwardedStreamLocal(let data):
+            self = .forwardedStreamLocal(.init(socketPath: data.socketPath))
         case .unknown(let name):
             self = .unknown(name)
         }

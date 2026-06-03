@@ -844,4 +844,140 @@ final class SSHMessagesTests: XCTestCase {
         let back = SSHChannelRequestEvent.fromMessage(message)
         XCTAssertEqual((back as? SSHChannelRequestEvent.BreakRequest)?.breakLength, 1000)
     }
+
+    // MARK: - streamlocal channel-open golden vectors
+
+    func testDirectStreamLocalChannelOpenGoldenVector() {
+        // Hand-authored from OpenSSH PROTOCOL.txt §2.4 (NOT a self-round-trip): the wire-format
+        // gate for direct-streamlocal@openssh.com. socketPath "/tmp/s", senderChannel 1,
+        // window 0x00200000, max 0x00008000. Direct has BOTH reserved fields (string + uint32).
+        let message = SSHMessage.ChannelOpenMessage(
+            type: .directStreamLocal(.init(socketPath: "/tmp/s")),
+            senderChannel: 1,
+            initialWindowSize: 0x0020_0000,
+            maximumPacketSize: 0x0000_8000
+        )
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        _ = buffer.writeChannelOpenMessage(message)
+        let expected: [UInt8] =
+            [0x00, 0x00, 0x00, 0x1e]  // type-name string length = 30
+            + Array("direct-streamlocal@openssh.com".utf8)
+            + [
+                0x00, 0x00, 0x00, 0x01,  // sender channel = 1
+                0x00, 0x20, 0x00, 0x00,  // initial window = 0x00200000
+                0x00, 0x00, 0x80, 0x00,  // max packet = 0x00008000
+                0x00, 0x00, 0x00, 0x06,  // socket-path string length = 6
+            ]
+            + Array("/tmp/s".utf8)
+            + [
+                0x00, 0x00, 0x00, 0x00,  // reserved string ("")
+                0x00, 0x00, 0x00, 0x00,  // reserved uint32 (0)
+            ]
+        XCTAssertEqual(Array(buffer.readableBytesView), expected)
+    }
+
+    func testForwardedStreamLocalChannelOpenGoldenVector() {
+        // Hand-authored from OpenSSH PROTOCOL.txt §2.4 (NOT a self-round-trip): the wire-format
+        // gate for forwarded-streamlocal@openssh.com. Identical layout to direct up to the
+        // socket-path + reserved string, but with NO trailing reserved uint32 — the reserved TAIL
+        // is 4 bytes shorter (string-only vs string+uint32). The 3-byte-longer type name nets the
+        // total payload to 1 byte shorter overall (63 vs 64 bytes).
+        let message = SSHMessage.ChannelOpenMessage(
+            type: .forwardedStreamLocal(.init(socketPath: "/tmp/s")),
+            senderChannel: 1,
+            initialWindowSize: 0x0020_0000,
+            maximumPacketSize: 0x0000_8000
+        )
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        _ = buffer.writeChannelOpenMessage(message)
+        let expected: [UInt8] =
+            [0x00, 0x00, 0x00, 0x21]  // type-name string length = 33
+            + Array("forwarded-streamlocal@openssh.com".utf8)
+            + [
+                0x00, 0x00, 0x00, 0x01,  // sender channel = 1
+                0x00, 0x20, 0x00, 0x00,  // initial window = 0x00200000
+                0x00, 0x00, 0x80, 0x00,  // max packet = 0x00008000
+                0x00, 0x00, 0x00, 0x06,  // socket-path string length = 6
+            ]
+            + Array("/tmp/s".utf8)
+            + [
+                0x00, 0x00, 0x00, 0x00  // reserved string ("") ONLY — no trailing uint32
+            ]
+        XCTAssertEqual(Array(buffer.readableBytesView), expected)
+    }
+
+    func testStreamLocalChannelOpenReadBack() throws {
+        // Direct: write via the codec, read it back, assert recovered socketPath.
+        let directMessage = SSHMessage.ChannelOpenMessage(
+            type: .directStreamLocal(.init(socketPath: "/tmp/direct.sock")),
+            senderChannel: 7,
+            initialWindowSize: 0x0020_0000,
+            maximumPacketSize: 0x0000_8000
+        )
+        var directBuffer = ByteBufferAllocator().buffer(capacity: 64)
+        _ = directBuffer.writeChannelOpenMessage(directMessage)
+        let recoveredDirect = try XCTUnwrap(try directBuffer.readChannelOpenMessage())
+        guard case .directStreamLocal(let directInfo) = recoveredDirect.type else {
+            XCTFail("expected directStreamLocal, got \(recoveredDirect.type)")
+            return
+        }
+        XCTAssertEqual(directInfo.socketPath, "/tmp/direct.sock")
+        XCTAssertEqual(recoveredDirect.senderChannel, 7)
+        XCTAssertEqual(directBuffer.readableBytes, 0, "direct reader must consume the full payload")
+
+        // Forwarded: write via the codec, then APPEND a sentinel uint32. The forwarded reader must
+        // NOT consume a trailing reserved uint32 — so the sentinel must still be readable after.
+        let forwardedMessage = SSHMessage.ChannelOpenMessage(
+            type: .forwardedStreamLocal(.init(socketPath: "/tmp/fwd.sock")),
+            senderChannel: 9,
+            initialWindowSize: 0x0020_0000,
+            maximumPacketSize: 0x0000_8000
+        )
+        var forwardedBuffer = ByteBufferAllocator().buffer(capacity: 64)
+        _ = forwardedBuffer.writeChannelOpenMessage(forwardedMessage)
+        let sentinel: UInt32 = 0xDEAD_BEEF
+        forwardedBuffer.writeInteger(sentinel)
+        let recoveredForwarded = try XCTUnwrap(try forwardedBuffer.readChannelOpenMessage())
+        guard case .forwardedStreamLocal(let forwardedInfo) = recoveredForwarded.type else {
+            XCTFail("expected forwardedStreamLocal, got \(recoveredForwarded.type)")
+            return
+        }
+        XCTAssertEqual(forwardedInfo.socketPath, "/tmp/fwd.sock")
+        XCTAssertEqual(recoveredForwarded.senderChannel, 9)
+        // The forwarded reader must have left the sentinel untouched (it did NOT eat a reserved uint32).
+        XCTAssertEqual(forwardedBuffer.readableBytes, 4, "forwarded reader must not consume a trailing uint32")
+        XCTAssertEqual(forwardedBuffer.readInteger(as: UInt32.self), sentinel)
+    }
+
+    func testStreamLocalChannelTypeConverterRoundTrip() {
+        // The public SSHChannelType <-> internal ChannelOpenMessage.ChannelType converters carry the
+        // socketPath in both directions for both streamlocal cases. These converters are on a live
+        // production path (SSHChildChannel outbound createChannel + inbound multiplexer) but are not
+        // exercised by the wire-codec tests above, which build the internal type directly.
+        for socketPath in ["/tmp/x", "/run/user/1000/forward.sock", ""] {
+            // direct: public -> internal -> public
+            let directPublic = SSHChannelType.directStreamLocal(.init(socketPath: socketPath))
+            let directInternal = SSHMessage.ChannelOpenMessage.ChannelType(directPublic)
+            guard case .directStreamLocal(let di) = directInternal else {
+                XCTFail("public->internal dropped the direct case for \(socketPath)")
+                return
+            }
+            XCTAssertEqual(di.socketPath, socketPath)
+            let directMessage = SSHMessage.ChannelOpenMessage(
+                type: directInternal, senderChannel: 0, initialWindowSize: 1, maximumPacketSize: 1)
+            XCTAssertEqual(SSHChannelType(directMessage), directPublic, "internal->public must round-trip direct")
+
+            // forwarded: public -> internal -> public
+            let fwdPublic = SSHChannelType.forwardedStreamLocal(.init(socketPath: socketPath))
+            let fwdInternal = SSHMessage.ChannelOpenMessage.ChannelType(fwdPublic)
+            guard case .forwardedStreamLocal(let fi) = fwdInternal else {
+                XCTFail("public->internal dropped the forwarded case for \(socketPath)")
+                return
+            }
+            XCTAssertEqual(fi.socketPath, socketPath)
+            let fwdMessage = SSHMessage.ChannelOpenMessage(
+                type: fwdInternal, senderChannel: 0, initialWindowSize: 1, maximumPacketSize: 1)
+            XCTAssertEqual(SSHChannelType(fwdMessage), fwdPublic, "internal->public must round-trip forwarded")
+        }
+    }
 }

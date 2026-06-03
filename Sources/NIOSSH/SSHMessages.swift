@@ -272,6 +272,8 @@ extension SSHMessage {
             case session
             case forwardedTCPIP(ForwardedTCPIP)
             case directTCPIP(DirectTCPIP)
+            case directStreamLocal(DirectStreamLocal)
+            case forwardedStreamLocal(ForwardedStreamLocal)
             case unknown(String)
         }
 
@@ -285,6 +287,14 @@ extension SSHMessage {
             var hostToConnectTo: String
             var portToConnectTo: UInt16
             var originatorAddress: SocketAddress
+        }
+
+        struct DirectStreamLocal: Equatable {
+            var socketPath: String
+        }
+
+        struct ForwardedStreamLocal: Equatable {
+            var socketPath: String
         }
 
         var type: ChannelType
@@ -1073,6 +1083,28 @@ extension ByteBuffer {
                     )
                 )
 
+            case "direct-streamlocal@openssh.com":
+                // PROTOCOL.txt §2.4: socket_path, reserved (string), reserved (uint32).
+                // Direct has BOTH reserved fields.
+                guard
+                    let socketPath = self.readSSHStringAsString(),
+                    self.readSSHStringAsString() != nil,  // reserved (string), ignored
+                    self.readInteger(as: UInt32.self) != nil  // reserved (uint32), ignored
+                else {
+                    return nil
+                }
+                type = .directStreamLocal(.init(socketPath: socketPath))
+
+            case "forwarded-streamlocal@openssh.com":
+                // PROTOCOL.txt §2.4: socket_path, reserved (string) ONLY — NO trailing uint32.
+                guard
+                    let socketPath = self.readSSHStringAsString(),
+                    self.readSSHStringAsString() != nil  // reserved (string) ONLY
+                else {
+                    return nil
+                }
+                type = .forwardedStreamLocal(.init(socketPath: socketPath))
+
             default:
                 type = .unknown(typeRawValue)
             }
@@ -1679,6 +1711,12 @@ extension ByteBuffer {
         case .directTCPIP:
             writtenBytes += self.writeSSHString("direct-tcpip".utf8)
 
+        case .directStreamLocal:
+            writtenBytes += self.writeSSHString("direct-streamlocal@openssh.com".utf8)
+
+        case .forwardedStreamLocal:
+            writtenBytes += self.writeSSHString("forwarded-streamlocal@openssh.com".utf8)
+
         case .unknown(let name):
             writtenBytes += self.writeSSHString(name.utf8)
         }
@@ -1704,6 +1742,17 @@ extension ByteBuffer {
             writtenBytes += self.writeInteger(UInt32(data.portToConnectTo))
             writtenBytes += self.writeSSHString((data.originatorAddress.ipAddress ?? "<nio-error>").utf8)
             writtenBytes += self.writeInteger(UInt32(data.originatorAddress.port ?? -1))
+
+        case .directStreamLocal(let data):
+            // PROTOCOL.txt §2.4: socket_path, reserved (string), reserved (uint32).
+            writtenBytes += self.writeSSHString(data.socketPath.utf8)
+            writtenBytes += self.writeSSHString("".utf8)  // reserved (string)
+            writtenBytes += self.writeInteger(UInt32(0))  // reserved (uint32)
+
+        case .forwardedStreamLocal(let data):
+            // PROTOCOL.txt §2.4: socket_path, reserved (string) ONLY — NO trailing uint32.
+            writtenBytes += self.writeSSHString(data.socketPath.utf8)
+            writtenBytes += self.writeSSHString("".utf8)  // reserved (string) ONLY
 
         case .unknown:
             // Unknown channel types have no additional data to write
