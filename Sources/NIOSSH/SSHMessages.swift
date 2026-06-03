@@ -1115,6 +1115,22 @@ extension ByteBuffer {
                 }
                 type = .forwardedStreamLocal(.init(socketPath: socketPath))
 
+            case "x11":
+                // RFC 4254 §6.3.2: a server-initiated x11 channel-open carries
+                // originator-address (string) + originator-port (uint32) AFTER the
+                // standard header. We surface x11 as `.unknown("x11")` (the inbound
+                // channel routes to the X11 connector regardless of origin), but we
+                // MUST consume the type-specific fields or the leftover bytes desync
+                // packet framing (SSHPacketParser requires the message fully read →
+                // invalidPacketFormat).
+                guard
+                    self.readSSHStringAsString() != nil,  // originator address, ignored
+                    self.readInteger(as: UInt32.self) != nil  // originator port, ignored
+                else {
+                    return nil
+                }
+                type = .unknown("x11")
+
             default:
                 type = .unknown(typeRawValue)
             }
@@ -1782,7 +1798,12 @@ extension ByteBuffer {
             writtenBytes += self.writeSSHString("".utf8)  // reserved (string) ONLY
 
         case .unknown:
-            // Unknown channel types have no additional data to write
+            // Unknown channel types have no additional data to write. NOTE: the
+            // read path has an explicit "x11" arm that CONSUMES originator-address
+            // + originator-port (RFC 4254 §6.3.2), so a `.unknown("x11")` does not
+            // round-trip through this writer. That is intentional: x11 channels are
+            // server-initiated, so a client only ever READS them — it never
+            // serializes one. Promote x11 to a typed case if write support is added.
             break
         }
 

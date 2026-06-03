@@ -1045,6 +1045,38 @@ final class SSHMessagesTests: XCTestCase {
         XCTAssertEqual(forwardedBuffer.readInteger(as: UInt32.self), sentinel)
     }
 
+    func testX11ChannelOpenReadConsumesOriginatorFields() throws {
+        // Hand-authored from RFC 4254 §6.3.2 (NOT a self-round-trip): a server-initiated
+        // x11 channel-open carries originator-address (string) + originator-port (uint32)
+        // AFTER the standard header. The reader MUST consume those type-specific fields —
+        // leaving them desyncs packet framing (SSHPacketParser requires the message content
+        // fully read) and surfaces as invalidPacketFormat, so the inbound x11 channel never
+        // reaches the multiplexer. x11 remains an `.unknown("x11")` channel type (the
+        // originator is not surfaced — the inbound x11 channel routes to the X11 connector
+        // regardless of origin).
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        buffer.writeBytes([0x00, 0x00, 0x00, 0x03] + Array("x11".utf8))  // type name "x11"
+        buffer.writeInteger(UInt32(5))  // sender channel
+        buffer.writeInteger(UInt32(0x0020_0000))  // initial window
+        buffer.writeInteger(UInt32(0x0000_8000))  // max packet
+        buffer.writeBytes([0x00, 0x00, 0x00, 0x09] + Array("127.0.0.1".utf8))  // originator address
+        buffer.writeInteger(UInt32(6010))  // originator port
+        // Sentinel proves the reader stops EXACTLY after the originator port.
+        let sentinel: UInt32 = 0xDEAD_BEEF
+        buffer.writeInteger(sentinel)
+
+        let recovered = try XCTUnwrap(try buffer.readChannelOpenMessage())
+        guard case .unknown(let name) = recovered.type else {
+            XCTFail("expected .unknown(\"x11\"), got \(recovered.type)")
+            return
+        }
+        XCTAssertEqual(name, "x11")
+        XCTAssertEqual(recovered.senderChannel, 5)
+        // The reader must have consumed the originator fields, leaving ONLY the sentinel.
+        XCTAssertEqual(buffer.readableBytes, 4, "x11 reader must consume originator address + port")
+        XCTAssertEqual(buffer.readInteger(as: UInt32.self), sentinel)
+    }
+
     func testStreamLocalChannelTypeConverterRoundTrip() {
         // The public SSHChannelType <-> internal ChannelOpenMessage.ChannelType converters carry the
         // socketPath in both directions for both streamlocal cases. These converters are on a live
