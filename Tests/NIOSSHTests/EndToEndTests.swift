@@ -311,6 +311,15 @@ class EndToEndTests: XCTestCase {
         helper(SSHChannelRequestEvent.LocalFlowControlRequest(clientCanDo: true))
         helper(SSHChannelRequestEvent.SignalRequest(signal: "USR1"))
         helper(SSHChannelRequestEvent.BreakRequest(breakLength: 1000, wantReply: false))
+        helper(
+            SSHChannelRequestEvent.X11ForwardingRequest(
+                wantReply: true,
+                singleConnection: false,
+                authProtocol: "MIT-MAGIC-COOKIE-1",
+                authCookie: "deadbeef",
+                screen: 0
+            )
+        )
         helper(ChannelSuccessEvent())
         helper(ChannelFailureEvent())
     }

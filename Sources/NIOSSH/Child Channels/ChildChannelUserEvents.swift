@@ -334,6 +334,43 @@ public enum SSHChannelRequestEvent: Sendable {
         }
     }
 
+    /// Request that the server enable X11 forwarding for this session
+    /// (`x11-req`, i.e. `ssh -X` / `ssh -Y`), per RFC 4254 §6.3.1. Fire on the
+    /// session child channel BEFORE invoking shell/exec. The server replies
+    /// channel-success or channel-failure, and on success opens an inbound
+    /// `x11` channel whenever a remote process connects to `$DISPLAY`.
+    public struct X11ForwardingRequest: Hashable, Sendable {
+        /// Whether a reply to this request is desired. Default is true so
+        /// the caller can observe accept/reject via ChannelSuccess/Failure.
+        public var wantReply: Bool
+
+        /// Whether only a single X11 connection should be forwarded.
+        public var singleConnection: Bool
+
+        /// The X11 authentication protocol name (usually "MIT-MAGIC-COOKIE-1").
+        public var authProtocol: String
+
+        /// The X11 authentication cookie (hex-encoded).
+        public var authCookie: String
+
+        /// The X11 screen number.
+        public var screen: UInt32
+
+        public init(
+            wantReply: Bool = true,
+            singleConnection: Bool = false,
+            authProtocol: String = "MIT-MAGIC-COOKIE-1",
+            authCookie: String,
+            screen: UInt32 = 0
+        ) {
+            self.wantReply = wantReply
+            self.singleConnection = singleConnection
+            self.authProtocol = authProtocol
+            self.authCookie = authCookie
+            self.screen = screen
+        }
+    }
+
     /// Request that the server enable agent forwarding for this session
     /// (`auth-agent-req@openssh.com`, i.e. `ssh -A`). Zero-payload request;
     /// fire on the session child channel BEFORE invoking shell/exec. The
@@ -392,6 +429,14 @@ extension SSHChannelRequestEvent {
             return SignalRequest(signal: signalName)
         case .breakRequest(let breakLength):
             return BreakRequest(breakLength: breakLength, wantReply: message.wantReply)
+        case .x11Req(let x11):
+            return X11ForwardingRequest(
+                wantReply: message.wantReply,
+                singleConnection: x11.singleConnection,
+                authProtocol: x11.authProtocol,
+                authCookie: x11.authCookie,
+                screen: x11.screen
+            )
         case .authAgentReq:
             return AgentForwardingRequest(wantReply: message.wantReply)
         case .unknown:
@@ -532,6 +577,22 @@ extension SSHMessage {
         let message = SSHMessage.ChannelRequestMessage(
             recipientChannel: recipientChannel,
             type: .breakRequest(event._breakLength),
+            wantReply: event.wantReply
+        )
+        self = .channelRequest(message)
+    }
+
+    init(_ event: SSHChannelRequestEvent.X11ForwardingRequest, recipientChannel: UInt32) {
+        let message = SSHMessage.ChannelRequestMessage(
+            recipientChannel: recipientChannel,
+            type: .x11Req(
+                .init(
+                    singleConnection: event.singleConnection,
+                    authProtocol: event.authProtocol,
+                    authCookie: event.authCookie,
+                    screen: event.screen
+                )
+            ),
             wantReply: event.wantReply
         )
         self = .channelRequest(message)

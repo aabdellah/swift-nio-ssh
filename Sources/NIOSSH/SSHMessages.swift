@@ -383,6 +383,8 @@ extension SSHMessage {
             case signal(String)
             /// RFC 4335 `break` channel request; payload = break-length ms.
             case breakRequest(UInt32)
+            /// RFC 4254 §6.3.1 `x11-req` channel request (ssh -X / -Y).
+            case x11Req(X11Request)
             /// Outbound `auth-agent-req@openssh.com` (ssh -A). Zero-payload
             /// channel request that asks the server to enable agent forwarding.
             case authAgentReq
@@ -403,6 +405,14 @@ extension SSHMessage {
             var rowHeight: UInt32
             var pixelWidth: UInt32
             var pixelHeight: UInt32
+        }
+
+        /// RFC 4254 §6.3.1 `x11-req` payload.
+        struct X11Request: Equatable {
+            var singleConnection: Bool
+            var authProtocol: String
+            var authCookie: String
+            var screen: UInt32
         }
 
         var recipientChannel: UInt32
@@ -1336,6 +1346,23 @@ extension ByteBuffer {
                     return nil
                 }
                 type = .breakRequest(breakLength)
+            case "x11-req":
+                guard
+                    let singleConnection = self.readSSHBoolean(),
+                    let authProtocol = self.readSSHStringAsString(),
+                    let authCookie = self.readSSHStringAsString(),
+                    let screen: UInt32 = self.readInteger()
+                else {
+                    return nil
+                }
+                type = .x11Req(
+                    .init(
+                        singleConnection: singleConnection,
+                        authProtocol: authProtocol,
+                        authCookie: authCookie,
+                        screen: screen
+                    )
+                )
             default:
                 type = .unknown
             }
@@ -1853,6 +1880,8 @@ extension ByteBuffer {
             writtenBytes += self.writeSSHString("signal".utf8)
         case .breakRequest:
             writtenBytes += self.writeSSHString("break".utf8)
+        case .x11Req:
+            writtenBytes += self.writeSSHString("x11-req".utf8)
         case .authAgentReq:
             writtenBytes += self.writeSSHString("auth-agent-req@openssh.com".utf8)
         case .unknown:
@@ -1896,6 +1925,11 @@ extension ByteBuffer {
             writtenBytes += self.writeSSHString(name.utf8)
         case .breakRequest(let breakLength):
             writtenBytes += self.writeInteger(breakLength)
+        case .x11Req(let d):
+            writtenBytes += self.writeSSHBoolean(d.singleConnection)
+            writtenBytes += self.writeSSHString(d.authProtocol.utf8)
+            writtenBytes += self.writeSSHString(d.authCookie.utf8)
+            writtenBytes += self.writeInteger(d.screen)
         case .authAgentReq:
             // Zero-payload — the request name string above is the entire body.
             break

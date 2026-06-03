@@ -845,6 +845,102 @@ final class SSHMessagesTests: XCTestCase {
         XCTAssertEqual((back as? SSHChannelRequestEvent.BreakRequest)?.breakLength, 1000)
     }
 
+    func testX11RequestGoldenVector() {
+        // recipientChannel = 0, want_reply = true, single_connection = false,
+        // "MIT-MAGIC-COOKIE-1", "deadbeef", screen = 0.
+        // Hand-authored from RFC 4254 §6.3.1 (NOT a self-round-trip): the wire-format gate.
+        let message = SSHMessage.ChannelRequestMessage(
+            recipientChannel: 0,
+            type: .x11Req(
+                .init(
+                    singleConnection: false,
+                    authProtocol: "MIT-MAGIC-COOKIE-1",
+                    authCookie: "deadbeef",
+                    screen: 0
+                )
+            ),
+            wantReply: true
+        )
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        _ = buffer.writeChannelRequestMessage(message)
+        var expected: [UInt8] = [0x00, 0x00, 0x00, 0x00]  // recipient channel = 0
+        expected += [0x00, 0x00, 0x00, 0x07] + Array("x11-req".utf8)  // "x11-req"
+        expected += [0x01]  // want_reply = true
+        expected += [0x00]  // single_connection = false
+        expected += [0x00, 0x00, 0x00, 0x12] + Array("MIT-MAGIC-COOKIE-1".utf8)  // auth protocol (18 bytes)
+        expected += [0x00, 0x00, 0x00, 0x08] + Array("deadbeef".utf8)  // auth cookie (8 bytes)
+        expected += [0x00, 0x00, 0x00, 0x00]  // screen = 0
+        XCTAssertEqual(Array(buffer.readableBytesView), expected)
+    }
+
+    func testX11RequestReadsGolden() throws {
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        var bytes: [UInt8] = [0x00, 0x00, 0x00, 0x07]  // recipient channel = 7
+        bytes += [0x00, 0x00, 0x00, 0x07] + Array("x11-req".utf8)  // "x11-req"
+        bytes += [0x01]  // want_reply = true
+        bytes += [0x01]  // single_connection = true
+        bytes += [0x00, 0x00, 0x00, 0x12] + Array("MIT-MAGIC-COOKIE-1".utf8)  // auth protocol
+        bytes += [0x00, 0x00, 0x00, 0x08] + Array("deadbeef".utf8)  // auth cookie
+        bytes += [0x00, 0x00, 0x00, 0x05]  // screen = 5
+        buffer.writeBytes(bytes)
+        let message = try XCTUnwrap(try buffer.readChannelRequestMessage())
+        XCTAssertEqual(message.recipientChannel, 7)
+        XCTAssertEqual(message.wantReply, true)
+        XCTAssertEqual(
+            message.type,
+            .x11Req(
+                .init(
+                    singleConnection: true,
+                    authProtocol: "MIT-MAGIC-COOKIE-1",
+                    authCookie: "deadbeef",
+                    screen: 5
+                )
+            )
+        )
+    }
+
+    func testX11RequestEventRoundTrip() {
+        let event = SSHChannelRequestEvent.X11ForwardingRequest(
+            wantReply: true,
+            singleConnection: false,
+            authProtocol: "MIT-MAGIC-COOKIE-1",
+            authCookie: "deadbeef",
+            screen: 0
+        )
+        let sshMessage = SSHMessage(event, recipientChannel: 3)
+        guard case .channelRequest(let message) = sshMessage else {
+            XCTFail("not a channel request")
+            return
+        }
+        XCTAssertEqual(
+            message.type,
+            .x11Req(
+                .init(
+                    singleConnection: false,
+                    authProtocol: "MIT-MAGIC-COOKIE-1",
+                    authCookie: "deadbeef",
+                    screen: 0
+                )
+            )
+        )
+        XCTAssertEqual(message.recipientChannel, 3)
+
+        // Inbound direction.
+        let back = SSHChannelRequestEvent.fromMessage(message)
+        XCTAssertEqual(back as? SSHChannelRequestEvent.X11ForwardingRequest, event)
+
+        // wantReply:false must propagate through fromMessage (guards a hardcode-to-true
+        // regression in the .x11Req fromMessage arm — distinct non-default fields too).
+        let noReply = SSHChannelRequestEvent.X11ForwardingRequest(
+            wantReply: false, singleConnection: true, authProtocol: "MIT-MAGIC-COOKIE-1",
+            authCookie: "cafe", screen: 7)
+        let noReplyMessage = SSHMessage(noReply, recipientChannel: 9)
+        let recovered = SSHChannelRequestEvent.fromMessage(
+            { if case .channelRequest(let m) = noReplyMessage { return m } else { fatalError() } }())
+        XCTAssertEqual(recovered as? SSHChannelRequestEvent.X11ForwardingRequest, noReply)
+        XCTAssertEqual((recovered as? SSHChannelRequestEvent.X11ForwardingRequest)?.wantReply, false)
+    }
+
     // MARK: - streamlocal channel-open golden vectors
 
     func testDirectStreamLocalChannelOpenGoldenVector() {
