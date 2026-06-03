@@ -97,6 +97,30 @@ final class InfiniteCertificateDelegate: NIOSSHClientUserAuthenticationDelegate 
     }
 }
 
+/// A client delegate that offers a password and records partial-success notifications.
+final class RecordingPartialSuccessDelegate: NIOSSHClientUserAuthenticationDelegate {
+    var partialSuccessCount = 0
+    var lastRemainingMethods: NIOSSHAvailableUserAuthenticationMethods?
+
+    func nextAuthenticationType(
+        availableMethods: NIOSSHAvailableUserAuthenticationMethods,
+        nextChallengePromise: EventLoopPromise<NIOSSHUserAuthenticationOffer?>
+    ) {
+        nextChallengePromise.succeed(
+            NIOSSHUserAuthenticationOffer(
+                username: "foo",
+                serviceName: "",
+                offer: .password(.init(password: "bar"))
+            )
+        )
+    }
+
+    func partialAuthenticationSucceeded(remainingMethods: NIOSSHAvailableUserAuthenticationMethods) {
+        self.partialSuccessCount += 1
+        self.lastRemainingMethods = remainingMethods
+    }
+}
+
 /// An authentication delegate that denies some number of requests and then accepts exactly one and fails the rest.
 final class DenyThenAcceptDelegate: NIOSSHServerUserAuthenticationDelegate {
     let supportedAuthenticationMethods: NIOSSHAvailableUserAuthenticationMethods = .all
@@ -420,6 +444,66 @@ final class UserAuthenticationStateMachineTests: XCTestCase {
 
         // Let's say we got a success. Happy path!
         XCTAssertNoThrow(try stateMachine.receiveUserAuthSuccess())
+    }
+
+    func testPartialSuccessNotifiesClientDelegate() throws {
+        let delegate = RecordingPartialSuccessDelegate()
+        var stateMachine = UserAuthenticationStateMachine(
+            role: .client(.init(userAuthDelegate: delegate, serverAuthDelegate: AcceptAllHostKeysDelegate())),
+            loop: self.loop,
+            sessionID: self.sessionID
+        )
+
+        XCTAssertNoThrow(try self.beginAuthentication(stateMachine: &stateMachine))
+        stateMachine.sendServiceRequest(.init(service: "ssh-userauth"))
+        let firstMessage = SSHMessage.UserAuthRequestMessage(
+            username: "foo",
+            service: "ssh-connection",
+            method: .password("bar")
+        )
+        XCTAssertNoThrow(
+            try self.serviceAccepted(service: "ssh-userauth", nextMessage: firstMessage, stateMachine: &stateMachine)
+        )
+        stateMachine.sendUserAuthRequest(firstMessage)
+
+        // PARTIAL_SUCCESS: the first stage passed; the server now requires another method.
+        let partial = SSHMessage.UserAuthFailureMessage(
+            authentications: ["keyboard-interactive"],
+            partialSuccess: true
+        )
+        try self.authFailed(failure: partial, nextMessage: firstMessage, stateMachine: &stateMachine)
+
+        XCTAssertEqual(delegate.partialSuccessCount, 1, "partial-success must notify the client delegate exactly once")
+        XCTAssertEqual(
+            try XCTUnwrap(delegate.lastRemainingMethods),
+            NIOSSHAvailableUserAuthenticationMethods(partial)
+        )
+    }
+
+    func testNonPartialFailureDoesNotSignalPartialSuccess() throws {
+        let delegate = RecordingPartialSuccessDelegate()
+        var stateMachine = UserAuthenticationStateMachine(
+            role: .client(.init(userAuthDelegate: delegate, serverAuthDelegate: AcceptAllHostKeysDelegate())),
+            loop: self.loop,
+            sessionID: self.sessionID
+        )
+
+        XCTAssertNoThrow(try self.beginAuthentication(stateMachine: &stateMachine))
+        stateMachine.sendServiceRequest(.init(service: "ssh-userauth"))
+        let firstMessage = SSHMessage.UserAuthRequestMessage(
+            username: "foo",
+            service: "ssh-connection",
+            method: .password("bar")
+        )
+        XCTAssertNoThrow(
+            try self.serviceAccepted(service: "ssh-userauth", nextMessage: firstMessage, stateMachine: &stateMachine)
+        )
+        stateMachine.sendUserAuthRequest(firstMessage)
+
+        let failure = SSHMessage.UserAuthFailureMessage(authentications: ["password"], partialSuccess: false)
+        try self.authFailed(failure: failure, nextMessage: firstMessage, stateMachine: &stateMachine)
+
+        XCTAssertEqual(delegate.partialSuccessCount, 0, "a non-partial failure must not signal partial-success")
     }
 
     func testAuthMessagesAfterSuccessAreIgnored() throws {

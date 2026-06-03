@@ -235,7 +235,14 @@ extension UserAuthenticationStateMachine {
             // Ok, the server didn't like that much. Let's try another one.
             self.state = .awaitingNextRequest
             precondition(responseCount == 1, "We don't support parallel authentication attempts yet!")
-            return self.requestNextAuthRequest(methods: .init(message), delegate: delegate)
+            let methods = NIOSSHAvailableUserAuthenticationMethods(message)
+            // RFC 4252 §5.1: a failure with `partial success = true` means the previous method
+            // was accepted and the server now requires a further method (multi-factor). Signal
+            // the delegate before requesting the next stage so it can reset per-stage state.
+            if message.partialSuccess {
+                delegate.partialAuthenticationSucceeded(remainingMethods: methods)
+            }
+            return self.requestNextAuthRequest(methods: methods, delegate: delegate)
         case (.client, .authenticationSucceeded):
             // We should ignore all further auth messages in this state.
             return nil

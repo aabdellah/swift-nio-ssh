@@ -66,6 +66,22 @@ public protocol NIOSSHClientUserAuthenticationDelegate {
         nextChallengePromise: EventLoopPromise<NIOSSHUserAuthenticationOffer?>
     )
 
+    /// Called when the server reports a *partial* authentication success: the previous method
+    /// was accepted, but the server requires one or more further methods before granting access
+    /// (RFC 4252 §5.1, `SSH_MSG_USERAUTH_FAILURE` with `partial success = true`). This is the
+    /// multi-factor (`AuthenticationMethods a,b`) continue signal.
+    ///
+    /// It is delivered immediately before the next ``nextAuthenticationType(availableMethods:nextChallengePromise:)``
+    /// call for the new stage, so a delegate can reset any per-stage credential bookkeeping
+    /// (the methods that satisfied the previous stage are spent; the next stage starts fresh).
+    ///
+    /// A default implementation is provided that does nothing, so existing conformers compile
+    /// and behave unchanged.
+    ///
+    /// - parameter remainingMethods: The authentication methods the server will now accept for
+    ///   the next stage.
+    func partialAuthenticationSucceeded(remainingMethods: NIOSSHAvailableUserAuthenticationMethods)
+
     /// Called when the server issues an RFC 4256 keyboard-interactive
     /// `SSH_MSG_USERAUTH_INFO_REQUEST` and the delegate must supply responses.
     ///
@@ -93,6 +109,8 @@ public protocol NIOSSHClientUserAuthenticationDelegate {
 }
 
 extension NIOSSHClientUserAuthenticationDelegate {
+    public func partialAuthenticationSucceeded(remainingMethods: NIOSSHAvailableUserAuthenticationMethods) {}
+
     public func respondToKeyboardInteractiveChallenge(
         name: String,
         instruction: String,
