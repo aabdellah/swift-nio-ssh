@@ -30,7 +30,8 @@ let package = Package(
     platforms: [
         .macOS(.v10_15),
         .iOS(.v13),
-        .watchOS(.v6),
+        // AESCTR MAC verification calls HMAC.isValidAuthenticationCode, which is watchOS 6.1+.
+        .watchOS("6.1"),
         .tvOS(.v13),
     ],
     products: [
