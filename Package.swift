@@ -29,10 +29,12 @@ let package = Package(
     name: "swift-nio-ssh",
     platforms: [
         .macOS(.v10_15),
-        .iOS(.v13),
-        // AESCTR MAC verification calls HMAC.isValidAuthenticationCode, which is watchOS 6.1+.
+        // AESCTR MAC verification calls HMAC.isValidAuthenticationCode, which is
+        // available on iOS 13.2 / tvOS 13.2 / watchOS 6.1+ (macOS 10.15+). The
+        // floors below are raised to match so the unguarded call type-checks.
+        .iOS("13.2"),
         .watchOS("6.1"),
-        .tvOS(.v13),
+        .tvOS("13.2"),
     ],
     products: [
         .library(name: "NIOSSH", targets: ["NIOSSH"])
