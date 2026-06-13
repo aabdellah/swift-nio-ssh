@@ -57,28 +57,56 @@ struct Poly1305 {
     }
 
     mutating func update<M: Collection>(_ message: M) where M.Element == UInt8 {
-        var block = [UInt8](repeating: 0, count: 16)
-        var it = message.makeIterator()
-        while true {
-            for i in 0..<16 { block[i] = 0 }
-            var n = 0
-            while n < 16, let b = it.next() { block[n] = b; n += 1 }
-            if n == 0 { break }                     // message exhausted on a block boundary
-            let hibit: UInt64 = (n == 16) ? 1 : 0   // full block adds 2^128
-            if n < 16 { block[n] = 1 }              // partial block: append a single 1 byte
-            addBlock(block, hibit: hibit)
-            multiplyByR()
-            if n < 16 { break }
+        // Poly1305 is invoked single-shot over a contiguous Array (lenCT‖payloadCT)
+        // per packet, so process the bytes directly through a raw pointer in
+        // 16-byte strides with 64-bit little-endian loads — avoiding the per-byte
+        // generic-iterator gather (`IndexingIterator.next` / `formIndex(after:)`)
+        // that dominated transport throughput in profiling and collapsed it to
+        // <1 MB/s. Falls back to a single buffered copy only for the rare
+        // non-contiguous Collection.
+        let done: Void? = message.withContiguousStorageIfAvailable { storage in
+            storage.withUnsafeBytes { self.updateContiguous($0) }
+        }
+        if done == nil {
+            let copy = Array(message)
+            copy.withUnsafeBytes { self.updateContiguous($0) }
         }
     }
 
-    private mutating func addBlock(_ block: [UInt8], hibit: UInt64) {
-        func le64(_ off: Int) -> UInt64 {
-            var v: UInt64 = 0
-            for i in 0..<8 { v |= UInt64(block[off + i]) << (8 * i) }
-            return v
+    /// Single-shot Poly1305 over a contiguous byte region. Full 16-byte blocks
+    /// add 2^128 (`hibit = 1`); a trailing partial block is zero-padded with a
+    /// single 0x01 marker byte (`hibit = 0`), per RFC 8439 §2.5. A zero-length
+    /// region is a no-op (message exhausted on a block boundary). Identical
+    /// block semantics to the previous byte-iterator form — only the gather changed.
+    private mutating func updateContiguous(_ buf: UnsafeRawBufferPointer) {
+        let count = buf.count
+        var off = 0
+        while off + 16 <= count {
+            let n0 = UInt64(littleEndian: buf.loadUnaligned(fromByteOffset: off, as: UInt64.self))
+            let n1 = UInt64(littleEndian: buf.loadUnaligned(fromByteOffset: off + 8, as: UInt64.self))
+            addBlock(n0, n1, hibit: 1)
+            multiplyByR()
+            off += 16
         }
-        let n0 = le64(0), n1 = le64(8)
+        let rem = count - off
+        if rem > 0 {
+            var block = [UInt8](repeating: 0, count: 16)
+            for i in 0..<rem { block[i] = buf[off + i] }
+            block[rem] = 1                          // partial block: append a single 1 byte
+            let (n0, n1): (UInt64, UInt64) = block.withUnsafeBytes {
+                (UInt64(littleEndian: $0.loadUnaligned(fromByteOffset: 0, as: UInt64.self)),
+                 UInt64(littleEndian: $0.loadUnaligned(fromByteOffset: 8, as: UInt64.self)))
+            }
+            addBlock(n0, n1, hibit: 0)
+            multiplyByR()
+        }
+    }
+
+    /// Adds one 16-byte block — supplied as its two little-endian 64-bit limbs —
+    /// plus the high-bit term into the accumulator. Limb arithmetic is unchanged
+    /// from the original byte-array form; only the byte→limb gather moved to the
+    /// caller (`updateContiguous`).
+    private mutating func addBlock(_ n0: UInt64, _ n1: UInt64, hibit: UInt64) {
         let (x0, c0) = h0.addingReportingOverflow(n0)
         h0 = x0
         let (x1, c1) = h1.addingReportingOverflow(n1)
