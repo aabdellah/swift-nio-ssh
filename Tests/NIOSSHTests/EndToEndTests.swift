@@ -956,6 +956,66 @@ class EndToEndTests: XCTestCase {
         XCTAssertEqual(accumulator.received, expected)
     }
 
+    func testChannelDataWrittenDuringRekeyWindowIsBufferedNotRejected() throws {
+        // Regression: a child-channel write issued *during* the KEXINIT…NEWKEYS
+        // window of a rekey (RFC 4253 §7.1 forbids channel data there) must be
+        // buffered and replayed when the window closes — not rejected. Pipelined
+        // transfers write continuously, so they inevitably write mid-window once
+        // they cross the peer's RekeyLimit (~1 GB for OpenSSH); failing the write
+        // tears the transfer down. `testChannelDataSurvivesDataThresholdRekey`
+        // cannot catch this: it fully drains each rekey between writes, so no
+        // write ever lands inside the window.
+        XCTAssertNoThrow(try self.channel.configureWithHarness(TestHarness()))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        let clientChannel = try self.channel.createNewChannel()
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+        guard let serverChannel = self.channel.activeServerChannels.first else {
+            XCTFail("Server channel not created")
+            return
+        }
+        let accumulator = ChannelDataAccumulator()
+        XCTAssertNoThrow(try serverChannel.pipeline.syncOperations.addHandler(accumulator))
+
+        // Open the rekey window: send our KEXINIT but do not yet exchange any
+        // messages, so the connection is parked mid-rekey and cannot send data.
+        let baseline = self.channel.clientSSHHandler!.rekeyInitiationCount
+        XCTAssertNoThrow(try self.channel.clientSSHHandler!._rekey())
+        XCTAssertGreaterThan(
+            self.channel.clientSSHHandler!.rekeyInitiationCount, baseline,
+            "the connection must be mid-rekey before we write")
+
+        // Write channel data *inside* the rekey window.
+        var payload = clientChannel.allocator.buffer(capacity: 17)
+        payload.writeString("rekey-window-data")
+        let expected = ByteBuffer(buffer: payload)
+
+        let succeeded = NIOLoopBoundBox(false, eventLoop: self.channel.client.eventLoop)
+        let failed = NIOLoopBoundBox(false, eventLoop: self.channel.client.eventLoop)
+        let promise = self.channel.client.eventLoop.makePromise(of: Void.self)
+        promise.futureResult.whenSuccess { succeeded.value = true }
+        promise.futureResult.whenFailure { _ in failed.value = true }
+        clientChannel.writeAndFlush(
+            SSHChannelData(type: .channel, data: .byteBuffer(payload)), promise: promise)
+
+        // The write must be held pending — neither rejected (the bug) nor delivered yet.
+        self.channel.run()
+        XCTAssertFalse(failed.value, "a write during the rekey window must not be rejected")
+        XCTAssertFalse(
+            succeeded.value, "a write during the rekey window must not complete before the window closes")
+
+        // Completing the rekey replays the buffered write: it succeeds, the bytes
+        // arrive intact, and the connection survives.
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+        XCTAssertTrue(succeeded.value, "the buffered write must succeed once the rekey completes")
+        XCTAssertFalse(failed.value, "the buffered write must not fail")
+        XCTAssertEqual(self.channel.activeServerChannels.count, 1, "the connection must survive the rekey")
+        XCTAssertEqual(
+            accumulator.received, expected,
+            "every byte written during the rekey window must arrive intact")
+    }
+
     func testDelayedHostKeyValidation() throws {
         class DelayedValidationDelegate: NIOSSHClientServerAuthenticationDelegate {
             var validationCount = 0

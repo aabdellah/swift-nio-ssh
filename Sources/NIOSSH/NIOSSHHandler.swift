@@ -81,6 +81,17 @@ public final class NIOSSHHandler {
     /// before we have emitted our own response. Accessed only on the event loop.
     private var keyExchangeFutureInFlight = false
 
+    /// Connection-layer messages from child channels (channel data, EOF, window
+    /// adjust, …) that arrived while a rekey was in flight. RFC 4253 §7.1 forbids
+    /// sending anything but transport/KEX messages between a KEXINIT and the
+    /// matching NEWKEYS, so rather than failing these writes — which would break
+    /// any transfer large enough to cross the peer's RekeyLimit (~1 GB for
+    /// OpenSSH) — we hold them here, in order, with their write promises, and
+    /// replay them once the connection can send channel data again. Bounded by
+    /// the child channels' flow-control windows. Accessed only on the event loop.
+    private var bufferedOutboundChannelMessages: CircularBuffer<(SSHMessage, EventLoopPromise<Void>?)> =
+        CircularBuffer(initialCapacity: 8)
+
     /// Test-only observable: the number of client-initiated rekeys this handler has
     /// begun (via `initiateRekey`). Used by the hermetic rekey-trigger tests to assert
     /// that a threshold actually fired without sniffing the encrypted KEX_INIT.
@@ -161,6 +172,7 @@ extension NIOSSHHandler: ChannelDuplexHandler {
         self.rekeyController?.scheduled?.cancel()
         self.rekeyController?.scheduled = nil
         self.failPendingRekeyCompletions(ChannelError.eof)
+        self.failBufferedOutboundChannelMessages(ChannelError.eof)
 
         // We don't actually need to nil out the multiplexer here (it will nil its reference to us)
         // but we _can_, and it doesn't hurt.
@@ -196,6 +208,7 @@ extension NIOSSHHandler: ChannelDuplexHandler {
         self.rekeyController?.scheduled?.cancel()
         self.rekeyController?.scheduled = nil
         self.failPendingRekeyCompletions(ChannelError.eof)
+        self.failBufferedOutboundChannelMessages(ChannelError.eof)
         self.multiplexer?.parentChannelInactive()
     }
 
@@ -231,6 +244,10 @@ extension NIOSSHHandler: ChannelDuplexHandler {
         // A completed rekey returns the connection to a rekeyable state; wake
         // any callers blocked in `rekey()` waiting for the window to close.
         self.resolveCompletedRekeyWaiters()
+
+        // The same window-close lets us replay any channel data buffered while
+        // the rekey was in flight (RFC 4253 §7.1).
+        self.flushBufferedOutboundChannelMessages(context: context)
     }
 
     public func channelReadComplete(context: ChannelHandlerContext) {
@@ -759,6 +776,41 @@ extension NIOSSHHandler {
         self.pendingRekeyCompletions = []
         for waiter in waiters { waiter.fail(error) }
     }
+
+    /// Replay channel-layer messages that were buffered during a rekey window, in
+    /// order, once the connection can send them again. A no-op when nothing is
+    /// buffered or the window is still open. If a fresh rekey is triggered while
+    /// flushing (a large replayed batch can re-cross the byte threshold), the
+    /// `canSendChannelData` guard stops the drain and the remainder stays buffered
+    /// for the next window — no message is dropped and order is preserved.
+    private func flushBufferedOutboundChannelMessages(context: ChannelHandlerContext) {
+        guard !self.bufferedOutboundChannelMessages.isEmpty, self.stateMachine.canSendChannelData else {
+            return
+        }
+        var didWrite = false
+        while self.stateMachine.canSendChannelData,
+            let (message, promise) = self.bufferedOutboundChannelMessages.popFirst()
+        {
+            didWrite = true
+            do {
+                try self.writeMessage(SSHMultiMessage(message), context: context, promise: promise)
+            } catch {
+                promise?.fail(error)
+            }
+        }
+        if didWrite {
+            context.flush()
+        }
+    }
+
+    /// Fail any channel messages still buffered for a rekey replay (connection
+    /// tearing down). Their child channels have already handed off these writes,
+    /// so only this handler can resolve their promises.
+    private func failBufferedOutboundChannelMessages(_ error: Error) {
+        while let (_, promise) = self.bufferedOutboundChannelMessages.popFirst() {
+            promise?.fail(error)
+        }
+    }
 }
 
 // MARK: Disconnect
@@ -778,6 +830,20 @@ extension NIOSSHHandler: SSHMultiplexerDelegate {
     func writeFromChildChannel(_ message: SSHMessage, _ promise: EventLoopPromise<Void>?) {
         guard let context = self.context else {
             promise?.fail(ChannelError.ioOnClosedChannel)
+            return
+        }
+
+        // RFC 4253 §7.1: no channel data may be sent during the KEXINIT…NEWKEYS
+        // window of a (re)key exchange. Every message from a child channel is
+        // connection-layer, so when the state machine cannot accept one we buffer
+        // it (preserving order and its promise) and replay it on rekey completion
+        // rather than failing the write — otherwise any transfer that crosses the
+        // peer's RekeyLimit (~1 GB for OpenSSH) would break mid-stream. We also
+        // keep buffering while a replay drain is still pending (buffer non-empty):
+        // the window can reopen mid-drain and a fresh write must not overtake the
+        // messages queued ahead of it.
+        guard self.stateMachine.canSendChannelData, self.bufferedOutboundChannelMessages.isEmpty else {
+            self.bufferedOutboundChannelMessages.append((message, promise))
             return
         }
 

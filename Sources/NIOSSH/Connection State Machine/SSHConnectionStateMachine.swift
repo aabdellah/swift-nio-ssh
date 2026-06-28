@@ -1343,6 +1343,24 @@ extension SSHConnectionStateMachine {
         if case .active = self.state { return true }
         return false
     }
+
+    /// True iff connection-layer (channel) messages may be sent right now. That
+    /// is the case when the connection is `.active`, or when a rekey is in flight
+    /// but we have already sent our NEWKEYS (`.rekeyingSentNewKeysState`) — RFC
+    /// 4253 §7.1 permits application data again once our NEWKEYS is on the wire.
+    /// It is false during the KEXINIT…our-NEWKEYS window of a (re)key exchange
+    /// (when channel data MUST be withheld), before the connection is active, and
+    /// after disconnect. Callers buffer channel messages while this is false.
+    var canSendChannelData: Bool {
+        switch self.state {
+        case .active, .rekeyingSentNewKeysState:
+            return true
+        case .idle, .sentVersion, .keyExchange, .receivedNewKeys, .sentNewKeys, .userAuthentication,
+            .receivedKexInitWhenActive, .sentKexInitWhenActive, .rekeying, .rekeyingReceivedNewKeysState,
+            .receivedDisconnect, .sentDisconnect:
+            return false
+        }
+    }
 }
 
 // MARK: Helper properties
