@@ -19,17 +19,35 @@ FULL=(build unit release)
 OPT_IN=()   # runnable only via --only (say why next to each one)
 
 stage_build() { swift build --build-tests; }
-stage_unit() { swift test; }
+stage_unit() { run_swift_test; }
 stage_release() { swift build -c release; }
 
 # ---- standard runner: keep byte-identical across repos ---------------------
 
-# Judge a swift-testing run by its summary line, never the exit code.
-# Usage: judge_swift_testing <log>; prints the last summary line.
-judge_swift_testing() {
-    grep -E "Test run with [0-9]+ tests?.*(passed|failed)" "$1" | tail -1
-    grep -qE "Test run with [0-9]+ tests?.*passed" "$1" \
-        && ! grep -qE "Test run with .*failed" "$1"
+# Run `swift test "$@"`, echo its output into the stage log and judge it with judge_tests.
+# Every `swift test` in a stage goes through this; env prefixes work (`VAR=1 run_swift_test`).
+run_swift_test() {
+    local out="$LOG_DIR/${stage:-adhoc}.test.out" rc
+    swift test "$@" >"$out" 2>&1
+    rc=$?
+    cat "$out"
+    judge_tests "$out" "$rc"
+}
+
+# Judge a test log, never the exit code alone: some harnesses exit 0 on failure and a filter
+# that matches nothing exits 0 too. Passes only when <rc> is 0, at least one test ran, and
+# neither the Swift Testing nor the XCTest summary reports a failure.
+# Usage: judge_tests <log> [<rc>]; prints the summary lines and any verdict reason.
+judge_tests() {
+    local log="$1" rc="${2:-0}"
+    grep -E "Test run with [0-9]+ tests?|Executed [0-9]+ tests?, with" "$log" | tail -3
+    if ((rc != 0)); then echo "verdict: swift test exited $rc"; return 1; fi
+    if grep -qE "Test run with .*failed|Executed [0-9]+ tests?, with [1-9][0-9]* failures?" "$log"; then
+        echo "verdict: the test summary reports failures"; return 1
+    fi
+    if ! grep -qE "Test run with [1-9][0-9]* tests?.*passed|Executed [1-9][0-9]* tests?, with 0 failures" "$log"; then
+        echo "verdict: no tests ran"; return 1
+    fi
 }
 
 usage() { echo "usage: $0 [--full | --only <stage> | --list]" >&2; exit 64; }
@@ -68,7 +86,7 @@ for stage in "${STAGES[@]}"; do
     else
         echo "FAIL  (log: $log)"
         # The log may live on another machine (remote runs): show the first errors.
-        grep -E "✘|error: |fatal" "$log" | grep -v "◇" | head -5 | cut -c1-200 | sed 's/^/    /'
+        grep -E "✘|error: |fatal|^verdict: " "$log" | grep -v "◇" | head -5 | cut -c1-200 | sed 's/^/    /'
         FAILED+=("$stage")
     fi
 done
