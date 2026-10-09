@@ -12,11 +12,14 @@ cd "$(dirname "$0")/.."
 
 # ---- repo-specific: name, stage sets, stage bodies -------------------------
 REPO=swift-nio-ssh
-FAST=(build unit)
-FULL=(build unit release)
+FAST=(scripts build unit)
+FULL=(scripts build unit release)
 # Not mapped: Linux unit tests, static SDK, soundness (swiftlang container scripts),
 # benchmarks (Benchmarks/ package, needs jemalloc), semver PR label check.
 OPT_IN=()   # runnable only via --only (say why next to each one)
+
+# One check, one stage: no hook or second stage re-runs a check (../Shell/agent_docs/gates-standard.md).
+stage_scripts() { bash Scripts/tests/gates-dedupe-lint-test.sh; }
 
 stage_build() { swift build --build-tests; }
 stage_unit() { run_swift_test; }
