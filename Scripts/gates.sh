@@ -56,6 +56,17 @@ judge_tests() {
 
 usage() { echo "usage: $0 [--full | --only <stage> | --list]" >&2; exit 64; }
 
+# A stage in BUILD_HOST_STAGES runs xcodebuild on this machine, so it runs only on the build host: LocalHostName
+# ahmeds-mac-studio AND the marker file ~/.shell-build-host (Shell's remote_is_build_host; Shell's
+# Scripts/tests/gates-build-host-runner-test.sh holds the two equal). Off it, a run that selects one is refused
+# before any stage starts, with exit 75 (EX_TEMPFAIL). Every repo declares the set, empty when no stage builds
+# with xcodebuild. An undeclared set, or an entry that names no stage_<name>, is a config error: exit 78 (EX_CONFIG),
+# checked before anything else, --list included. REPO names the kit in the refusal.
+declare -p BUILD_HOST_STAGES >/dev/null 2>&1 || { echo "gates: BUILD_HOST_STAGES is not declared" >&2; exit 78; }
+for x in ${BUILD_HOST_STAGES[@]+"${BUILD_HOST_STAGES[@]}"}; do
+    declare -F "stage_$x" >/dev/null || { echo "gates: BUILD_HOST_STAGES names '$x', which has no stage_$x" >&2; exit 78; }
+done
+
 STAGES=("${FAST[@]}")
 case "${1:-}" in
     --full) STAGES=("${FULL[@]}") ;;
@@ -70,15 +81,6 @@ case "${1:-}" in
     *) usage ;;
 esac
 
-# A stage in BUILD_HOST_STAGES runs xcodebuild on this machine, so it runs only on the build host: LocalHostName
-# ahmeds-mac-studio AND the marker file ~/.shell-build-host (Shell's remote_is_build_host; Shell's
-# Scripts/tests/gates-build-host-runner-test.sh holds the two equal). Off it, a run that selects one is refused
-# before any stage starts, with exit 75 (EX_TEMPFAIL). Every repo declares the set, empty when no stage builds
-# with xcodebuild. An undeclared set, or an entry that names no stage_<name>, is a config error: exit 78 (EX_CONFIG).
-declare -p BUILD_HOST_STAGES >/dev/null 2>&1 || { echo "gates: BUILD_HOST_STAGES is not declared" >&2; exit 78; }
-for x in ${BUILD_HOST_STAGES[@]+"${BUILD_HOST_STAGES[@]}"}; do
-    declare -F "stage_$x" >/dev/null || { echo "gates: BUILD_HOST_STAGES names '$x', which has no stage_$x" >&2; exit 78; }
-done
 heavy=()
 for stage in "${STAGES[@]}"; do
     for x in ${BUILD_HOST_STAGES[@]+"${BUILD_HOST_STAGES[@]}"}; do [[ "$stage" == "$x" ]] && heavy+=("$stage"); done
@@ -87,12 +89,9 @@ if ((${#heavy[@]})); then
     here="$(/usr/sbin/scutil --get LocalHostName 2>/dev/null || true)"
     if [[ "$(printf '%s' "$here" | /usr/bin/tr 'A-Z' 'a-z')" != ahmeds-mac-studio \
           || ! -f "${HOME:-/nonexistent}/.shell-build-host" ]]; then
-        # The kit is the main checkout's directory name, also from a worktree (remote-kit-test.sh's <Kit>).
-        kit="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" && kit="$(basename "$(dirname "$kit")")" \
-            || kit="$REPO"
-        echo "refusing: $kit stage(s) ${heavy[*]} run xcodebuild, and ${here:-this machine} is not the build host." >&2
-        echo "Run them there, from Shell: Scripts/remote-kit-test.sh $kit --gates [--full | --only <stage>]" >&2
-        echo "From a worktree, prefix SHELL_REMOTE_SRC_$(printf '%s' "$kit" | /usr/bin/tr -c '[:alnum:]_' '_')=$PWD" >&2
+        echo "refusing: $REPO stage(s) ${heavy[*]} run xcodebuild, and ${here:-this machine} is not the build host." >&2
+        echo "Run them there, from Shell: Scripts/remote-kit-test.sh $REPO --gates [--full | --only <stage>]" >&2
+        echo "From a worktree, prefix SHELL_REMOTE_SRC_$(printf '%s' "$REPO" | /usr/bin/tr -c '[:alnum:]_' '_')=$PWD" >&2
         exit 75
     fi
 fi
