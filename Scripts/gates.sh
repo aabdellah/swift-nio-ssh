@@ -17,7 +17,7 @@ FULL=(scripts build unit release)
 # Not mapped: Linux unit tests, static SDK, soundness (swiftlang container scripts),
 # benchmarks (Benchmarks/ package, needs jemalloc), semver PR label check.
 OPT_IN=()   # runnable only via --only (say why next to each one)
-XCODEBUILD_STAGES=()   # no stage runs xcodebuild here
+BUILD_HOST_STAGES=()   # no stage runs xcodebuild here
 
 # One check, one stage: no hook or second stage re-runs a check (../Shell/agent_docs/gates-standard.md).
 stage_scripts() { bash Scripts/tests/gates-dedupe-lint-test.sh && bash Scripts/tests/gates-per-run-logs-test.sh; }
@@ -61,28 +61,38 @@ case "${1:-}" in
     --full) STAGES=("${FULL[@]}") ;;
     --only) [[ -n "${2:-}" ]] || usage; STAGES=("$2") ;;
     --list)
-        echo "fast:   ${FAST[*]}"
-        echo "full:   ${FULL[*]}"
-        echo "opt-in: ${OPT_IN[*]:-}"
+        echo "fast:       ${FAST[*]}"
+        echo "full:       ${FULL[*]}"
+        echo "opt-in:     ${OPT_IN[*]:-}"
+        echo "build-host: ${BUILD_HOST_STAGES[*]:-}"
         exit 0 ;;
     "") ;;
     *) usage ;;
 esac
 
-# A stage in XCODEBUILD_STAGES runs xcodebuild on this machine, so it runs only on the build host: LocalHostName
-# ahmeds-mac-studio AND the marker file ~/.shell-build-host (Shell's remote_is_build_host). Off it, a run that
-# selects one is refused before any stage starts, with exit 75 (EX_TEMPFAIL): run it there through Shell's
-# Scripts/remote-kit-test.sh <Kit> --gates. Every repo declares the set, empty when no stage builds with xcodebuild.
-declare -p XCODEBUILD_STAGES >/dev/null 2>&1 || { echo "gates: XCODEBUILD_STAGES is not declared" >&2; exit 64; }
+# A stage in BUILD_HOST_STAGES runs xcodebuild on this machine, so it runs only on the build host: LocalHostName
+# ahmeds-mac-studio AND the marker file ~/.shell-build-host (Shell's remote_is_build_host; Shell's
+# Scripts/tests/gates-build-host-runner-test.sh holds the two equal). Off it, a run that selects one is refused
+# before any stage starts, with exit 75 (EX_TEMPFAIL). Every repo declares the set, empty when no stage builds
+# with xcodebuild. An undeclared set, or an entry that names no stage_<name>, is a config error: exit 78 (EX_CONFIG).
+declare -p BUILD_HOST_STAGES >/dev/null 2>&1 || { echo "gates: BUILD_HOST_STAGES is not declared" >&2; exit 78; }
+for x in ${BUILD_HOST_STAGES[@]+"${BUILD_HOST_STAGES[@]}"}; do
+    declare -F "stage_$x" >/dev/null || { echo "gates: BUILD_HOST_STAGES names '$x', which has no stage_$x" >&2; exit 78; }
+done
 heavy=()
 for stage in "${STAGES[@]}"; do
-    for x in ${XCODEBUILD_STAGES[@]+"${XCODEBUILD_STAGES[@]}"}; do [[ "$stage" == "$x" ]] && heavy+=("$stage"); done
+    for x in ${BUILD_HOST_STAGES[@]+"${BUILD_HOST_STAGES[@]}"}; do [[ "$stage" == "$x" ]] && heavy+=("$stage"); done
 done
 if ((${#heavy[@]})); then
     here="$(/usr/sbin/scutil --get LocalHostName 2>/dev/null || true)"
-    if [[ "$(printf '%s' "$here" | tr 'A-Z' 'a-z')" != ahmeds-mac-studio || ! -f "$HOME/.shell-build-host" ]]; then
-        echo "refusing: stage(s) ${heavy[*]} run xcodebuild, and ${here:-this machine} is not the build host." >&2
-        echo "Run them there: <Shell>/Scripts/remote-kit-test.sh <Kit> --gates [--full | --only <stage>]" >&2
+    if [[ "$(printf '%s' "$here" | /usr/bin/tr 'A-Z' 'a-z')" != ahmeds-mac-studio \
+          || ! -f "${HOME:-/nonexistent}/.shell-build-host" ]]; then
+        # The kit is the main checkout's directory name, also from a worktree (remote-kit-test.sh's <Kit>).
+        kit="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" && kit="$(basename "$(dirname "$kit")")" \
+            || kit="$REPO"
+        echo "refusing: $kit stage(s) ${heavy[*]} run xcodebuild, and ${here:-this machine} is not the build host." >&2
+        echo "Run them there, from Shell: Scripts/remote-kit-test.sh $kit --gates [--full | --only <stage>]" >&2
+        echo "From a worktree, prefix SHELL_REMOTE_SRC_$(printf '%s' "$kit" | /usr/bin/tr -c '[:alnum:]_' '_')=$PWD" >&2
         exit 75
     fi
 fi
