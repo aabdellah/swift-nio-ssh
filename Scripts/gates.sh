@@ -17,6 +17,7 @@ FULL=(scripts build unit release)
 # Not mapped: Linux unit tests, static SDK, soundness (swiftlang container scripts),
 # benchmarks (Benchmarks/ package, needs jemalloc), semver PR label check.
 OPT_IN=()   # runnable only via --only (say why next to each one)
+XCODEBUILD_STAGES=()   # no stage runs xcodebuild here
 
 # One check, one stage: no hook or second stage re-runs a check (../Shell/agent_docs/gates-standard.md).
 stage_scripts() { bash Scripts/tests/gates-dedupe-lint-test.sh && bash Scripts/tests/gates-per-run-logs-test.sh; }
@@ -67,6 +68,24 @@ case "${1:-}" in
     "") ;;
     *) usage ;;
 esac
+
+# A stage in XCODEBUILD_STAGES runs xcodebuild on this machine, so it runs only on the build host: LocalHostName
+# ahmeds-mac-studio AND the marker file ~/.shell-build-host (Shell's remote_is_build_host). Off it, a run that
+# selects one is refused before any stage starts, with exit 75 (EX_TEMPFAIL): run it there through Shell's
+# Scripts/remote-kit-test.sh <Kit> --gates. Every repo declares the set, empty when no stage builds with xcodebuild.
+declare -p XCODEBUILD_STAGES >/dev/null 2>&1 || { echo "gates: XCODEBUILD_STAGES is not declared" >&2; exit 64; }
+heavy=()
+for stage in "${STAGES[@]}"; do
+    for x in ${XCODEBUILD_STAGES[@]+"${XCODEBUILD_STAGES[@]}"}; do [[ "$stage" == "$x" ]] && heavy+=("$stage"); done
+done
+if ((${#heavy[@]})); then
+    here="$(/usr/sbin/scutil --get LocalHostName 2>/dev/null || true)"
+    if [[ "$(printf '%s' "$here" | tr 'A-Z' 'a-z')" != ahmeds-mac-studio || ! -f "$HOME/.shell-build-host" ]]; then
+        echo "refusing: stage(s) ${heavy[*]} run xcodebuild, and ${here:-this machine} is not the build host." >&2
+        echo "Run them there: <Shell>/Scripts/remote-kit-test.sh <Kit> --gates [--full | --only <stage>]" >&2
+        exit 75
+    fi
+fi
 
 LOG_ROOT="${TMPDIR:-/tmp}"; LOG_ROOT="${LOG_ROOT%/}/$REPO-gates"
 # A shared /tmp lets another user pre-create this path: own it or refuse.
