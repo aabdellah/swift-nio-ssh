@@ -32,6 +32,7 @@ REPO=demo
 FAST=(a)
 FULL=(a)
 OPT_IN=()
+XCODEBUILD_STAGES=()
 # Prints the run's token, waits (bounded) until the other run has started, prints it again.
 stage_a() {
     echo "run $TOKEN"
