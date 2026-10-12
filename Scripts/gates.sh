@@ -19,7 +19,7 @@ FULL=(scripts build unit release)
 OPT_IN=()   # runnable only via --only (say why next to each one)
 
 # One check, one stage: no hook or second stage re-runs a check (../Shell/agent_docs/gates-standard.md).
-stage_scripts() { bash Scripts/tests/gates-dedupe-lint-test.sh; }
+stage_scripts() { bash Scripts/tests/gates-dedupe-lint-test.sh && bash Scripts/tests/gates-per-run-logs-test.sh; }
 
 stage_build() { swift build --build-tests; }
 stage_unit() { run_swift_test; }
@@ -68,13 +68,17 @@ case "${1:-}" in
     *) usage ;;
 esac
 
-LOG_DIR="${TMPDIR:-/tmp}"; LOG_DIR="${LOG_DIR%/}/$REPO-gates"
+LOG_ROOT="${TMPDIR:-/tmp}"; LOG_ROOT="${LOG_ROOT%/}/$REPO-gates"
 # A shared /tmp lets another user pre-create this path: own it or refuse.
-mkdir -p -m 700 "$LOG_DIR"
-if [[ -L "$LOG_DIR" || ! -O "$LOG_DIR" ]]; then
-    echo "refusing log dir $LOG_DIR: not a directory owned by $(id -un)" >&2
+mkdir -p -m 700 "$LOG_ROOT"
+if [[ -L "$LOG_ROOT" || ! -O "$LOG_ROOT" ]]; then
+    echo "refusing log dir $LOG_ROOT: not a directory owned by $(id -un)" >&2
     exit 1
 fi
+# One directory per run: concurrent runs (lanes, worktrees) never write each other's logs.
+# Runs older than a week are removed.
+find "$LOG_ROOT" -mindepth 1 -maxdepth 1 -name 'run.*' -mtime +7 -exec rm -rf {} + 2>/dev/null
+LOG_DIR="$(mktemp -d "$LOG_ROOT/run.XXXXXX")" || { echo "cannot create a run log dir under $LOG_ROOT" >&2; exit 1; }
 FAILED=()
 
 for stage in "${STAGES[@]}"; do
@@ -94,6 +98,7 @@ for stage in "${STAGES[@]}"; do
     fi
 done
 
+echo "logs: $LOG_DIR"
 if ((${#FAILED[@]})); then
     echo "Failed gates: ${FAILED[*]}"
     exit 1
