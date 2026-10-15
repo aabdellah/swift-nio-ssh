@@ -4,7 +4,10 @@
 # The contract (../Shell/agent_docs/gates-standard.md): a check lives in ONE script, reached from ONE stage of
 # Scripts/gates.sh; everything else - hooks, docs, wrappers - reaches it as `Scripts/gates.sh --only
 # <stage>`. This gate fails when
-#   1. a script is invoked from two stages of Scripts/gates.sh (helpers a stage calls count as the stage);
+#   1. a script is invoked from two stages of Scripts/gates.sh (helpers a stage calls count as the stage),
+#      unless gates.sh pins it in MEASUREMENTS: a measurement of the stage run itself (TerminalKit's display
+#      counter, run around each on-screen stage), not a check of the tree. Every gates.sh declares the table,
+#      `MEASUREMENTS=()` when it has none; each entry is one line with its reason in a comment;
 #   2. a git hook (.githooks/*) invokes a stage's script, or a script that script runs, directly
 #      instead of through `Scripts/gates.sh --only <stage>`;
 #   3. a Claude Code hook (.claude/hooks/*, .claude/settings.json) runs a stage's check at all - a hook
@@ -73,8 +76,25 @@ scan() { # $1 = repo root; prints violations, exits 1 on any
                     $first{$r} //= $st;
                 }
             }
+            # The MEASUREMENTS table: scripts that measure a stage run, not check the tree, exempt from the
+            # one-stage rule (the hook and Swift-test rules still apply). Declared in every gates.sh, one
+            # entry per line with its reason in a comment; `MEASUREMENTS=()` when there is none.
+            my %MEASUREMENT;
+            if ($gates =~ /^MEASUREMENTS=\(\s*\)\s*(?:#.*)?$/m) {
+            } elsif ($gates =~ /^MEASUREMENTS=\(\s*\n(.*?)^\)/ms) {
+                for my $line (split /\n/, $1) {
+                    next if $line =~ /^\s*(?:#.*)?$/;
+                    my ($r, $why) = $line =~ /^\s*(\S+)\s*(?:#\s*(.*?))?\s*$/;
+                    push @bad, "$G: MEASUREMENTS entry $r has no reason (one per line, the reason in a comment)"
+                        unless defined $why && length $why;
+                    $MEASUREMENT{$r} = 1;
+                }
+            } else {
+                push @bad, "$G: declares no MEASUREMENTS table (MEASUREMENTS=() when it has no measurement; Shell agent_docs/gates-standard.md, Contract)";
+            }
             # one check = one script with one argument list (a platform flag makes a different check)
             for my $r (sort keys %owner) {
+                next if $MEASUREMENT{$r};
                 for my $a (sort keys %{ $owner{$r} }) {
                     my @st = @{ $owner{$r}{$a} };
                     push @bad, "Scripts/gates.sh: $r" . ($a eq "" ? "" : " $a") . " is run by stages @st - one check, one stage"
@@ -135,7 +155,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FIX="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/gates-dedupe.XXXXXX")"
 trap '/bin/rm -rf "$FIX"' EXIT
 mkdir -p "$FIX/Scripts/tests" "$FIX/.githooks" "$FIX/.claude/hooks" "$FIX/Tests/T"
-printf 'helper() { bash Scripts/x-lint.sh; }\nstage_a() { helper; }\nstage_b() {\n    bash Scripts/x-lint.sh\n}\nstage_c() { bash Scripts/tests/run-all.sh; }\n' > "$FIX/Scripts/gates.sh"
+# A measurement pinned in MEASUREMENTS runs from two stages and is not reported; an entry with no reason is.
+printf 'MEASUREMENTS=(\n    Scripts/display-events.sh   # counts the display changes over the run of the stage that calls it\n    Scripts/w-probe.sh\n)\nhelper() { bash Scripts/x-lint.sh; bash Scripts/display-events.sh end "$t0"; }\nstage_a() { helper; }\nstage_b() {\n    bash Scripts/x-lint.sh\n    bash Scripts/display-events.sh end "$t0"\n}\nstage_c() { bash Scripts/tests/run-all.sh; }\n' > "$FIX/Scripts/gates.sh"
 printf '#!/bin/bash\nexec Scripts/tests/run-all.sh\n' > "$FIX/.githooks/pre-commit"
 printf '#!/bin/bash\nout="$(bash Scripts/y-lint.sh)"\n' > "$FIX/.claude/hooks/guard.sh"
 printf '#!/bin/bash\nbash "$ROOT/Scripts/y-lint.sh" --fixture\n' > "$FIX/Scripts/tests/y-lint-test.sh"
@@ -143,19 +164,17 @@ printf 'let gate = "Scripts/tests/z-test.sh"\n' > "$FIX/Tests/T/Gate.swift"
 out="$(scan "$FIX")"; rc=$?
 fails=0
 for want in "x-lint.sh is run by stages a b" ".githooks/pre-commit: runs Scripts/tests/run-all.sh" \
-    ".claude/hooks/guard.sh: a Claude Code hook runs Scripts/y-lint.sh" "Gate.swift: re-runs the script gates"; do
+    ".claude/hooks/guard.sh: a Claude Code hook runs Scripts/y-lint.sh" "Gate.swift: re-runs the script gates" \
+    "MEASUREMENTS entry Scripts/w-probe.sh has no reason"; do
     [[ "$out" == *"$want"* ]] || { echo "FAIL: the planted tree did not report: $want"; fails=1; }
 done
+[[ "$out" == *"display-events.sh is run by stages"* ]] && { echo "FAIL: a pinned measurement run by two stages was reported"; fails=1; }
 [ "$rc" -eq 1 ] || { echo "FAIL: the planted tree exited $rc, want 1"; fails=1; }
 ((fails)) && { printf '%s\n' "$out"; exit 1; }
-
-# KNOWN HOLE (Shell review tk-history-load r4 R4-3): this copy has no measurement exemption, so a kit
-# whose display counter runs around two on-screen stages (TerminalKit's display_watch) fails its lint or
-# forks it. This asserts today's verdict; the fix (a MEASUREMENTS table in gates.sh) flips it.
-mkdir -p "$FIX/meas/Scripts"
-printf 'stage_a() { bash Scripts/display-events.sh end "$t0"; }\nstage_b() { bash Scripts/display-events.sh end "$t0"; }\n' > "$FIX/meas/Scripts/gates.sh"
-out="$(scan "$FIX/meas")"
-[[ "$out" == *"display-events.sh"*"is run by stages a b"* ]] \
-    || { echo "FAIL: the measurement hole closed (a counter run by two stages was not reported): flip this case"; printf '%s\n' "$out"; exit 1; }
+# A gates.sh with no MEASUREMENTS table at all is reported.
+mkdir -p "$FIX/bare/Scripts"; printf 'stage_a() { bash Scripts/x-lint.sh; }\n' > "$FIX/bare/Scripts/gates.sh"
+out="$(scan "$FIX/bare")"; rc=$?
+[[ "$out" == *"declares no MEASUREMENTS table"* ]] && [ "$rc" -eq 1 ] \
+    || { echo "FAIL: a gates.sh with no MEASUREMENTS table was not reported (rc=$rc)"; printf '%s\n' "$out"; exit 1; }
 
 scan "$ROOT"
