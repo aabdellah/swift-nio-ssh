@@ -21,7 +21,7 @@ BUILD_HOST_STAGES=()   # no stage runs xcodebuild here
 MEASUREMENTS=()   # scripts that measure a stage run, exempt from the one-check-one-stage lint: none here
 
 # One check, one stage: no hook or second stage re-runs a check (../Shell/agent_docs/gates-standard.md).
-stage_scripts() { bash Scripts/tests/gates-dedupe-lint-test.sh && bash Scripts/tests/gates-per-run-logs-test.sh; }
+stage_scripts() { bash Scripts/tests/gates-dedupe-lint-test.sh && bash Scripts/tests/gates-per-run-logs-test.sh && bash Scripts/tests/gates-build-host-heavy-test.sh; }
 
 stage_build() { swift build --build-tests; }
 stage_unit() { run_swift_test; }
