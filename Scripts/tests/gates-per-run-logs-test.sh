@@ -11,6 +11,10 @@
 # repo's runner runs twice concurrently with one TMPDIR. Each stage prints
 # its run's token, waits for the other run to have started, and prints it again.
 #
+# The same demo judges a planted `swift test` (a fake swift on PATH) through the runner's
+# run_swift_test: one `swift test` prints several runs, and each run that started must
+# print its own summary, or the stage fails (review r4 R4-1).
+#
 # Usage: Scripts/tests/gates-per-run-logs-test.sh
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -44,6 +48,8 @@ stage_a() {
     echo "run $TOKEN"
     [ "${STAGE_FAIL:-0}" = 0 ]
 }
+# One planted `swift test` (the fake swift prints $FAKE_SWIFT_OUT), judged by the runner.
+stage_b() { run_swift_test; }
 
 EOF
     /usr/bin/sed -n '/^# ---- standard runner/,$p' "$TEMPLATE"
@@ -81,6 +87,22 @@ if TMPDIR="$TMP/tmp2" BARRIER="$TMP/barrier" TOKEN=x "$TMP/repo/Scripts/gates.sh
 else
     grep -q 'refusing log dir' "$TMP/sym.out" && ok "a symlinked log root is refused" || bad "unexpected: $(cat "$TMP/sym.out")"
 fi
+
+echo "a swift test passes only when every run that started printed its summary"
+mkdir -p "$TMP/bin"
+printf '#!/bin/sh\n/bin/cat "$FAKE_SWIFT_OUT"\n' > "$TMP/bin/swift"; chmod +x "$TMP/bin/swift"
+printf '%s\n' '◇ Test run started.' '✔ Test run with 9 tests in 2 suites passed after 0.1 seconds.' \
+    '◇ Test run started.' '✔ Test run with 6 tests in 1 suite passed after 0.1 seconds.' > "$TMP/whole.out"
+printf '%s\n' '◇ Test run started.' '◇ Test run started.' \
+    '✔ Test run with 6 tests in 1 suite passed after 0.1 seconds.' > "$TMP/cut.out"
+judge_run() { TMPDIR="$TMP/tmpdir" PATH="$TMP/bin:$PATH" FAKE_SWIFT_OUT="$1" "$TMP/repo/Scripts/gates.sh" --only b > "$2" 2>&1; }
+judge_run "$TMP/whole.out" "$TMP/whole.run"; rc=$?
+[ "$rc" = 0 ] && ok "two runs, both finished: the stage passes" || bad "two finished runs exited $rc: $(cat "$TMP/whole.run")"
+judge_run "$TMP/cut.out" "$TMP/cut.run"; rc=$?
+# KNOWN HOLE (review r4 R4-1): exit 0 and one run's summary stand in for a run that never finished.
+# This asserts today's wrong verdict; the fix flips it to a FAIL with the run count.
+[ "$rc" = 0 ] && ok "KNOWN HOLE: two runs started, one finished, the stage still passes" \
+    || bad "the known hole closed (exit $rc): flip this case: $(cat "$TMP/cut.run")"
 
 echo
 if [ "$PASS" -eq 0 ] && [ "$FAIL" -eq 0 ]; then echo "gates per-run logs: no assertions ran" >&2; exit 2; fi
