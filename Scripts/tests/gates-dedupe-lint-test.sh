@@ -176,5 +176,12 @@ mkdir -p "$FIX/bare/Scripts"; printf 'stage_a() { bash Scripts/x-lint.sh; }\n' >
 out="$(scan "$FIX/bare")"; rc=$?
 [[ "$out" == *"declares no MEASUREMENTS table"* ]] && [ "$rc" -eq 1 ] \
     || { echo "FAIL: a gates.sh with no MEASUREMENTS table was not reported (rc=$rc)"; printf '%s\n' "$out"; exit 1; }
+# KNOWN HOLE (review r5 R5-3): a MEASUREMENTS entry whose script is gone, and that no stage runs, passes. This
+# asserts today's verdict; the fix reports the entry and flips it.
+mkdir -p "$FIX/gone/Scripts"
+printf 'MEASUREMENTS=(\n    Scripts/gone.sh   # measured a stage run once; the script has since been deleted\n)\nstage_a() { bash Scripts/x-lint.sh; }\n' > "$FIX/gone/Scripts/gates.sh"
+out="$(scan "$FIX/gone")"; rc=$?
+[[ "$out" == *"0 violation(s)"* ]] && [ "$rc" -eq 0 ] \
+    || { echo "FAIL: KNOWN HOLE: a MEASUREMENTS entry for a gone script no longer passes (rc=$rc)"; printf '%s\n' "$out"; exit 1; }
 
 scan "$ROOT"
