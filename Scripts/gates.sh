@@ -55,6 +55,8 @@ judge_tests() {
     # exits 0 mid-suite (anything that stops the main run loop) prints no summary of its own. Another
     # run's summary must not stand in for it. A Swift Testing run ends in its `Test run with` line; an
     # XCTest run's top suite ('All tests' or 'Selected tests') ends in passed|failed and `Executed`.
+    # Blind spots: a run that exits before it prints its start line is never counted, and the XCTest
+    # workers of `swift test --parallel` print no top-suite lines, so this count is not a census of runs.
     started=$(grep -cE "Test run started\.|Test Suite '(All|Selected) tests' started" "$log")
     finished=$(awk '/Test run with [0-9]+ tests? .*(passed|failed)/ { n++ }
         top { if (/Executed [0-9]+ tests?, with/) n++; top = 0 }

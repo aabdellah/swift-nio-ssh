@@ -7,7 +7,8 @@
 #   1. a script is invoked from two stages of Scripts/gates.sh (helpers a stage calls count as the stage),
 #      unless gates.sh pins it in MEASUREMENTS: a measurement of the stage run itself (TerminalKit's display
 #      counter, run around each on-screen stage), not a check of the tree. Every gates.sh declares the table,
-#      `MEASUREMENTS=()` when it has none; each entry is one line with its reason in a comment;
+#      `MEASUREMENTS=()` when it has none; each entry is one line with its reason in a comment, and names a
+#      script that exists and that some stage runs (an exemption that outlived its script is litter);
 #   2. a git hook (.githooks/*) invokes a stage's script, or a script that script runs, directly
 #      instead of through `Scripts/gates.sh --only <stage>`;
 #   3. a Claude Code hook (.claude/hooks/*, .claude/settings.json) runs a stage's check at all - a hook
@@ -92,6 +93,11 @@ scan() { # $1 = repo root; prints violations, exits 1 on any
             } else {
                 push @bad, "$G: declares no MEASUREMENTS table (MEASUREMENTS=() when it has no measurement; Shell agent_docs/gates-standard.md, Contract)";
             }
+            # an entry must still name a script some stage runs, and the script must exist
+            for my $r (sort keys %MEASUREMENT) {
+                if (!exists $owner{$r}) { push @bad, "$G: MEASUREMENTS entry $r is run by no stage - delete the entry" }
+                elsif (!-f $r) { push @bad, "$G: MEASUREMENTS entry $r is not a file in the repo - delete the entry" }
+            }
             # one check = one script with one argument list (a platform flag makes a different check)
             for my $r (sort keys %owner) {
                 next if $MEASUREMENT{$r};
@@ -155,6 +161,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FIX="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/gates-dedupe.XXXXXX")"
 trap '/bin/rm -rf "$FIX"' EXIT
 mkdir -p "$FIX/Scripts/tests" "$FIX/.githooks" "$FIX/.claude/hooks" "$FIX/Tests/T"
+touch "$FIX/Scripts/display-events.sh"
 # A measurement pinned in MEASUREMENTS runs from two stages and is not reported; an entry with no reason is.
 printf 'MEASUREMENTS=(\n    Scripts/display-events.sh   # counts the display changes over the run of the stage that calls it\n    Scripts/w-probe.sh\n)\nhelper() { bash Scripts/x-lint.sh; bash Scripts/display-events.sh end "$t0"; }\nstage_a() { helper; }\nstage_b() {\n    bash Scripts/x-lint.sh\n    bash Scripts/display-events.sh end "$t0"\n}\nstage_c() { bash Scripts/tests/run-all.sh; }\n' > "$FIX/Scripts/gates.sh"
 printf '#!/bin/bash\nexec Scripts/tests/run-all.sh\n' > "$FIX/.githooks/pre-commit"
@@ -176,12 +183,13 @@ mkdir -p "$FIX/bare/Scripts"; printf 'stage_a() { bash Scripts/x-lint.sh; }\n' >
 out="$(scan "$FIX/bare")"; rc=$?
 [[ "$out" == *"declares no MEASUREMENTS table"* ]] && [ "$rc" -eq 1 ] \
     || { echo "FAIL: a gates.sh with no MEASUREMENTS table was not reported (rc=$rc)"; printf '%s\n' "$out"; exit 1; }
-# KNOWN HOLE (review r5 R5-3): a MEASUREMENTS entry whose script is gone, and that no stage runs, passes. This
-# asserts today's verdict; the fix reports the entry and flips it.
+# A MEASUREMENTS entry must name a script that exists and that some stage runs (review r5 R5-3).
 mkdir -p "$FIX/gone/Scripts"
-printf 'MEASUREMENTS=(\n    Scripts/gone.sh   # measured a stage run once; the script has since been deleted\n)\nstage_a() { bash Scripts/x-lint.sh; }\n' > "$FIX/gone/Scripts/gates.sh"
+printf 'MEASUREMENTS=(\n    Scripts/gone.sh   # measured a stage run once; the script has since been deleted\n    Scripts/lost.sh   # a stage still runs it, but the file is gone\n)\nstage_a() { bash Scripts/x-lint.sh; bash Scripts/lost.sh; }\n' > "$FIX/gone/Scripts/gates.sh"
 out="$(scan "$FIX/gone")"; rc=$?
-[[ "$out" == *"0 violation(s)"* ]] && [ "$rc" -eq 0 ] \
-    || { echo "FAIL: KNOWN HOLE: a MEASUREMENTS entry for a gone script no longer passes (rc=$rc)"; printf '%s\n' "$out"; exit 1; }
+for want in "MEASUREMENTS entry Scripts/gone.sh is run by no stage" "MEASUREMENTS entry Scripts/lost.sh is not a file in the repo"; do
+    [[ "$out" == *"$want"* ]] || { echo "FAIL: the planted tree did not report: $want"; printf '%s\n' "$out"; exit 1; }
+done
+[ "$rc" -eq 1 ] || { echo "FAIL: a stale MEASUREMENTS entry exited $rc, want 1"; exit 1; }
 
 scan "$ROOT"
