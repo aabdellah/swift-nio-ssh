@@ -70,11 +70,10 @@ echo "gates build-host heavy stages - $GATES"
 echo "  build-host: ${BUILD_HOST_STAGES[*]:-}"
 rc=0
 for x in ${broken[@]+"${broken[@]}"}; do echo "  FAIL $x" >&2; rc=1; done
-# KNOWN HOLE (red): today these stages build on the laptop. The fix lists them and flips this block.
 if ((${#unlisted[@]})); then
-    echo "  ok   KNOWN HOLE: stage(s) ${unlisted[*]} build outside the fast set and are not in BUILD_HOST_STAGES"
-else
-    echo "  FAIL the known hole is closed: flip this block to require every building stage listed" >&2
+    echo "  FAIL stage(s) ${unlisted[*]} build outside the fast set and are not in BUILD_HOST_STAGES" >&2
     rc=1
+else
+    echo "  ok   every stage outside the fast set that builds is in BUILD_HOST_STAGES"
 fi
 exit "$rc"
