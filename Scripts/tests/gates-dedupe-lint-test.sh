@@ -149,4 +149,13 @@ done
 [ "$rc" -eq 1 ] || { echo "FAIL: the planted tree exited $rc, want 1"; fails=1; }
 ((fails)) && { printf '%s\n' "$out"; exit 1; }
 
+# KNOWN HOLE (Shell review tk-history-load r4 R4-3): this copy has no measurement exemption, so a kit
+# whose display counter runs around two on-screen stages (TerminalKit's display_watch) fails its lint or
+# forks it. This asserts today's verdict; the fix (a MEASUREMENTS table in gates.sh) flips it.
+mkdir -p "$FIX/meas/Scripts"
+printf 'stage_a() { bash Scripts/display-events.sh end "$t0"; }\nstage_b() { bash Scripts/display-events.sh end "$t0"; }\n' > "$FIX/meas/Scripts/gates.sh"
+out="$(scan "$FIX/meas")"
+[[ "$out" == *"display-events.sh"*"is run by stages a b"* ]] \
+    || { echo "FAIL: the measurement hole closed (a counter run by two stages was not reported): flip this case"; printf '%s\n' "$out"; exit 1; }
+
 scan "$ROOT"
