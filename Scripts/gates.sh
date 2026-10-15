@@ -38,17 +38,28 @@ run_swift_test() {
     judge_tests "$out" "$rc"
 }
 
-# Judge a test log, never the exit code alone: some harnesses exit 0 on failure and a filter
-# that matches nothing exits 0 too. Passes only when <rc> is 0, at least one test ran, and
-# neither the Swift Testing nor the XCTest summary reports a failure.
+# Judge a test log, never the exit code alone: some harnesses exit 0 on failure, a filter
+# that matches nothing exits 0 too, and a test process that stops mid-suite can exit 0 with no
+# summary. Passes only when <rc> is 0, every run that started printed its summary, at least one
+# test ran, and neither the Swift Testing nor the XCTest summary reports a failure.
 # Usage: judge_tests <log> [<rc>]; prints the summary lines and any verdict reason.
 judge_tests() {
-    local log="$1" rc="${2:-0}"
+    local log="$1" rc="${2:-0}" started finished
     grep -E "Test run with [0-9]+ tests?|Executed [0-9]+ tests?, with" "$log" | tail -3
     if ((rc != 0)); then echo "verdict: swift test exited $rc"; return 1; fi
     if grep -qE "Test run with .*failed|Executed [0-9]+ tests?, with [1-9][0-9]* failures?" "$log"; then
         echo "verdict: the test summary reports failures"; return 1
     fi
+    # Every run that started finished: one `swift test` prints several runs, and a test process that
+    # exits 0 mid-suite (anything that stops the main run loop) prints no summary of its own. Another
+    # run's summary must not stand in for it. A Swift Testing run ends in its `Test run with` line; an
+    # XCTest run's top suite ('All tests' or 'Selected tests') ends in passed|failed and `Executed`.
+    started=$(grep -cE "Test run started\.|Test Suite '(All|Selected) tests' started" "$log")
+    finished=$(awk '/Test run with [0-9]+ tests? .*(passed|failed)/ { n++ }
+        top { if (/Executed [0-9]+ tests?, with/) n++; top = 0 }
+        /Test Suite .(All|Selected) tests. (passed|failed)/ { top = 1 }
+        END { print n + 0 }' "$log")
+    if ((started > finished)); then echo "verdict: $started test runs started, $finished finished"; return 1; fi
     if ! grep -qE "Test run with [1-9][0-9]* tests?.*passed|Executed [1-9][0-9]* tests?, with 0 failures" "$log"; then
         echo "verdict: no tests ran"; return 1
     fi

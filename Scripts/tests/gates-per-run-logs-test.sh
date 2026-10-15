@@ -99,10 +99,11 @@ judge_run() { TMPDIR="$TMP/tmpdir" PATH="$TMP/bin:$PATH" FAKE_SWIFT_OUT="$1" "$T
 judge_run "$TMP/whole.out" "$TMP/whole.run"; rc=$?
 [ "$rc" = 0 ] && ok "two runs, both finished: the stage passes" || bad "two finished runs exited $rc: $(cat "$TMP/whole.run")"
 judge_run "$TMP/cut.out" "$TMP/cut.run"; rc=$?
-# KNOWN HOLE (review r4 R4-1): exit 0 and one run's summary stand in for a run that never finished.
-# This asserts today's wrong verdict; the fix flips it to a FAIL with the run count.
-[ "$rc" = 0 ] && ok "KNOWN HOLE: two runs started, one finished, the stage still passes" \
-    || bad "the known hole closed (exit $rc): flip this case: $(cat "$TMP/cut.run")"
+# Exit 0 and one run's summary must not stand in for a run that never finished.
+[ "$rc" = 1 ] && ok "two runs started, one finished: the stage fails" \
+    || bad "two runs started and one finished exited $rc: $(cat "$TMP/cut.run")"
+grep -q '^    verdict: 2 test runs started, 1 finished$' "$TMP/cut.run" \
+    && ok "the FAIL names the runs that started and finished" || bad "no run-count verdict: $(cat "$TMP/cut.run")"
 
 echo
 if [ "$PASS" -eq 0 ] && [ "$FAIL" -eq 0 ]; then echo "gates per-run logs: no assertions ran" >&2; exit 2; fi
