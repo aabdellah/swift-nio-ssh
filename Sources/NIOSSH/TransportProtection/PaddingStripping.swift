@@ -21,7 +21,8 @@ extension Data {
     /// §6). The leading padding-length byte and the trailing padding bytes are sliced off,
     /// leaving the payload. Shared by the non-AEAD transport-protection schemes
     /// (chacha20-poly1305@openssh.com, AES-CTR) that decrypt a full plaintext body before
-    /// stripping padding. Mirrors `AESGCM.swift`'s private `removePaddingBytes()`.
+    /// stripping padding. AES-GCM strips its padding inside the receive buffer instead
+    /// (`AESGCMTransportProtection.consumeOpenedPacket`).
     mutating func removePaddingBytesChaCha() throws {
         guard let paddingLength = self.first, paddingLength >= 4 else {
             throw NIOSSHError.insufficientPadding

@@ -92,73 +92,151 @@ extension AESGCMTransportProtection: NIOSSHTransportProtection {
     }
 
     func decryptAndVerifyRemainingPacket(_ source: inout ByteBuffer, sequenceNumber _: UInt32) throws -> ByteBuffer {
-        var plaintext: Data
+        // The first 4 bytes are the length. The last 16 are the tag. Everything else is ciphertext. We expect
+        // that the ciphertext is a clean multiple of the block size, and to be non-zero.
+        let ciphertextLength = source.readableBytes - Self.packetLengthBytes - Self.tagBytes
+        guard ciphertextLength > 0, ciphertextLength % Self.cipherBlockSize == 0 else {
+            // The only way this fails is if the payload doesn't match this encryption scheme.
+            throw NIOSSHError.invalidEncryptedPacketLength
+        }
 
-        // Establish a nested scope here to avoid the byte buffer views causing an accidental CoW.
-        do {
-            // The first 4 bytes are the length. The last 16 are the tag. Everything else is ciphertext. We expect
-            // that the ciphertext is a clean multiple of the block size, and to be non-zero.
-            guard let lengthView = source.readSlice(length: 4)?.readableBytesView,
-                let ciphertextView = source.readSlice(length: source.readableBytes - 16)?.readableBytesView,
-                let tagView = source.readSlice(length: 16)?.readableBytesView,
-                ciphertextView.count > 0, ciphertextView.count % Self.cipherBlockSize == 0
-            else {
-                // The only way this fails is if the payload doesn't match this encryption scheme.
-                throw NIOSSHError.invalidEncryptedPacketLength
-            }
-
-            // Ok, let's try to decrypt this data.
-            let sealedBox = try AES.GCM.SealedBox(nonce: self.inboundNonce, ciphertext: ciphertextView, tag: tagView)
-            plaintext = try AES.GCM.open(sealedBox, using: self.inboundEncryptionKey, authenticating: lengthView)
-
-            // All good! A quick soundness check to verify that the length of the plaintext is ok.
-            guard plaintext.count % Self.cipherBlockSize == 0, plaintext.count == ciphertextView.count else {
-                throw NIOSSHError.invalidDecryptedPlaintextLength
-            }
+        let nonce = try AES.GCM.Nonce(data: self.inboundNonce)
+        if #available(macOS 27, iOS 27, tvOS 27, watchOS 27, visionOS 27, *) {
+            try Self.openInPlace(&source, using: self.inboundEncryptionKey, nonce: nonce)
+        } else {
+            try Self.openCopying(&source, using: self.inboundEncryptionKey, nonce: nonce)
         }
 
         // Don't forget to increment the inbound nonce.
         self.inboundNonce.increment()
 
-        // Ok, we want to write the plaintext back into the buffer. This contains the padding length byte and the padding
-        // bytes, so we want to strip those. We write back into the buffer and then slice the return value out because
-        // it's highly likely that the source buffer is held uniquely, which means we can avoid an allocation.
-        try plaintext.removePaddingBytes()
-        source.prependData(plaintext)
-
-        // This slice read must succeed, as we just wrote in that many bytes.
-        return source.readSlice(length: plaintext.count)!
+        return try Self.consumeOpenedPacket(&source, plaintextLength: ciphertextLength)
     }
 
     func encryptPacket(_ destination: inout ByteBuffer, sequenceNumber: UInt32) throws {
-        // Keep track of where the length is going to be written.
-        let packetLengthIndex = destination.readerIndex
-        let packetLengthLength = MemoryLayout<UInt32>.size
-        let packetPaddingIndex = destination.readerIndex + packetLengthLength
-
-        // We encrypte everything, except the length
-        let encryptedBufferSize = destination.readableBytes - packetLengthLength
-
-        // Now we need to encrypt the data. We pass the length field as additional authenticated data, and the encrypted
-        // payload portion as the data to encrypt. We know these views will be valid, so we forcibly unwrap them: if they're invalid,
-        // our math was wrong and we cannot recover.
-        let sealedBox = try AES.GCM.seal(
-            destination.viewBytes(at: packetPaddingIndex, length: encryptedBufferSize)!,
-            using: self.outboundEncryptionKey,
-            nonce: try AES.GCM.Nonce(data: self.outboundNonce),
-            authenticating: destination.viewBytes(at: packetLengthIndex, length: packetLengthLength)!
-        )
-
-        assert(sealedBox.ciphertext.count == encryptedBufferSize)
-
-        // We now want to overwrite the portion of the bytebuffer that contains the plaintext with the ciphertext,
-        // and then append the tag.
-        destination.setContiguousBytes(sealedBox.ciphertext, at: packetPaddingIndex)
-        let tagLength = destination.writeContiguousBytes(sealedBox.tag)
-        precondition(tagLength == self.macBytes, "Unexpected short tag")
+        let nonce = try AES.GCM.Nonce(data: self.outboundNonce)
+        if #available(macOS 27, iOS 27, tvOS 27, watchOS 27, visionOS 27, *) {
+            try Self.sealInPlace(&destination, using: self.outboundEncryptionKey, nonce: nonce)
+        } else {
+            try Self.sealCopying(&destination, using: self.outboundEncryptionKey, nonce: nonce)
+        }
 
         // Now we increment the Nonce for the next use, and then we're done!
         self.outboundNonce.increment()
+    }
+}
+
+// The AEAD step of the transport, in two interchangeable implementations. Both take a packet whose readable bytes
+// are exactly `[length (4)][body][tag (16)]` (open) or `[length (4)][body]` (seal), use the cleartext length as
+// the additional authenticated data, and leave the reader and writer indices as the framing above expects. The
+// in-place pair encrypts and decrypts the body inside the buffer's own storage (CryptoKit on OS 27, swift-crypto
+// elsewhere); the copying pair is the OS 26 road and stays directly callable so tests can hold the two equal.
+extension AESGCMTransportProtection {
+    static var packetLengthBytes: Int { MemoryLayout<UInt32>.size }
+
+    static var tagBytes: Int { 16 }
+
+    /// Decrypts and verifies the body of `packet` in place, leaving the plaintext where the ciphertext was.
+    @available(macOS 27, iOS 27, tvOS 27, watchOS 27, visionOS 27, *)
+    static func openInPlace(_ packet: inout ByteBuffer, using key: SymmetricKey, nonce: AES.GCM.Nonce) throws {
+        let lengthBytes = Self.packetLengthBytes
+        let tagBytes = Self.tagBytes
+        try packet.withUnsafeMutableReadableBytes { bytes in
+            let bodyEnd = bytes.count - tagBytes
+            let lengthField = UnsafeRawBufferPointer(rebasing: bytes[..<lengthBytes])
+            let tagField = UnsafeRawBufferPointer(rebasing: bytes[bodyEnd...])
+            let bodyField = UnsafeMutableRawBufferPointer(rebasing: bytes[lengthBytes..<bodyEnd])
+            var body = bodyField.mutableBytes
+            try AES.GCM.open(
+                inPlace: &body,
+                using: key,
+                nonce: nonce,
+                authenticating: lengthField.bytes,
+                tag: tagField.bytes
+            )
+        }
+    }
+
+    /// The OS 26 road of ``openInPlace(_:using:nonce:)``: decrypts into a fresh allocation and writes the
+    /// plaintext back over the ciphertext.
+    static func openCopying(_ packet: inout ByteBuffer, using key: SymmetricKey, nonce: AES.GCM.Nonce) throws {
+        let bodyIndex = packet.readerIndex + Self.packetLengthBytes
+        let bodyLength = packet.readableBytes - Self.packetLengthBytes - Self.tagBytes
+        let plaintext: Data
+        // Establish a nested scope here to avoid the byte buffer views causing an accidental CoW.
+        do {
+            let lengthView = packet.viewBytes(at: packet.readerIndex, length: Self.packetLengthBytes)!
+            let ciphertextView = packet.viewBytes(at: bodyIndex, length: bodyLength)!
+            let tagView = packet.viewBytes(at: bodyIndex + bodyLength, length: Self.tagBytes)!
+            let sealedBox = try AES.GCM.SealedBox(nonce: nonce, ciphertext: ciphertextView, tag: tagView)
+            plaintext = try AES.GCM.open(sealedBox, using: key, authenticating: lengthView)
+        }
+        guard plaintext.count == bodyLength else {
+            throw NIOSSHError.invalidDecryptedPlaintextLength
+        }
+        packet.setContiguousBytes(plaintext, at: bodyIndex)
+    }
+
+    /// Encrypts the body of `packet` in place and appends the tag.
+    @available(macOS 27, iOS 27, tvOS 27, watchOS 27, visionOS 27, *)
+    static func sealInPlace(_ packet: inout ByteBuffer, using key: SymmetricKey, nonce: AES.GCM.Nonce) throws {
+        let lengthBytes = Self.packetLengthBytes
+        let tagBytes = Self.tagBytes
+        packet.writeRepeatingByte(0, count: tagBytes)
+        let tagLength = try packet.withUnsafeMutableReadableBytes { bytes in
+            let bodyEnd = bytes.count - tagBytes
+            let lengthField = UnsafeRawBufferPointer(rebasing: bytes[..<lengthBytes])
+            let bodyField = UnsafeMutableRawBufferPointer(rebasing: bytes[lengthBytes..<bodyEnd])
+            let tagField = UnsafeMutableRawBufferPointer(rebasing: bytes[bodyEnd...])
+            var body = bodyField.mutableBytes
+            var tag = OutputRawSpan(buffer: tagField, initializedCount: 0)
+            try AES.GCM.seal(
+                inPlace: &body,
+                using: key,
+                nonce: nonce,
+                authenticating: lengthField.bytes,
+                tag: &tag
+            )
+            return tag.finalize(for: tagField)
+        }
+        precondition(tagLength == tagBytes, "Unexpected short tag")
+    }
+
+    /// The OS 26 road of ``sealInPlace(_:using:nonce:)``: encrypts into a fresh allocation, writes the
+    /// ciphertext back over the plaintext and appends the tag.
+    static func sealCopying(_ packet: inout ByteBuffer, using key: SymmetricKey, nonce: AES.GCM.Nonce) throws {
+        let bodyIndex = packet.readerIndex + Self.packetLengthBytes
+        let bodyLength = packet.readableBytes - Self.packetLengthBytes
+        // We know these views will be valid, so we forcibly unwrap them: if they're invalid, our math was wrong
+        // and we cannot recover.
+        let sealedBox = try AES.GCM.seal(
+            packet.viewBytes(at: bodyIndex, length: bodyLength)!,
+            using: key,
+            nonce: nonce,
+            authenticating: packet.viewBytes(at: packet.readerIndex, length: Self.packetLengthBytes)!
+        )
+        assert(sealedBox.ciphertext.count == bodyLength)
+        packet.setContiguousBytes(sealedBox.ciphertext, at: bodyIndex)
+        let tagLength = packet.writeContiguousBytes(sealedBox.tag)
+        precondition(tagLength == Self.tagBytes, "Unexpected short tag")
+    }
+
+    /// Strips the length, padding-length byte, padding and tag from an opened packet, returning the payload and
+    /// leaving `packet` fully consumed.
+    static func consumeOpenedPacket(_ packet: inout ByteBuffer, plaintextLength: Int) throws -> ByteBuffer {
+        packet.moveReaderIndex(forwardBy: Self.packetLengthBytes)
+        guard let paddingLength = packet.readInteger(as: UInt8.self), paddingLength >= 4 else {
+            throw NIOSSHError.insufficientPadding
+        }
+        // If the padding walks off the front of the body there is too much padding for the available data.
+        let payloadLength = plaintextLength - 1 - Int(paddingLength)
+        guard payloadLength >= 0 else {
+            throw NIOSSHError.excessPadding
+        }
+        // This slice read must succeed: the body holds at least that many bytes.
+        let payload = packet.readSlice(length: payloadLength)!
+        packet.moveReaderIndex(to: packet.writerIndex)
+        return payload
     }
 }
 
@@ -329,44 +407,15 @@ extension SSHAESGCMNonce: DataProtocol {
     }
 }
 
-extension ByteBuffer {
-    /// Prepends the given Data to this ByteBuffer.
-    ///
-    /// Will crash if there isn't space in the front of this buffer, so please ensure there is!
-    fileprivate mutating func prependData(_ data: Data) {
-        self.moveReaderIndex(to: self.readerIndex - data.count)
-        self.setContiguousBytes(data, at: self.readerIndex)
-    }
-}
-
-extension Data {
-    /// Removes the padding bytes from a Data object.
-    fileprivate mutating func removePaddingBytes() throws {
-        guard let paddingLength = self.first, paddingLength >= 4 else {
-            throw NIOSSHError.insufficientPadding
-        }
-
-        // We're going to slice out the content bytes. To do that, can simply find the end index of the content, and confirm it's
-        // not walked off the front of the buffer. If it has, there's too much padding and an error has occurred.
-        let contentStartIndex = self.index(after: self.startIndex)
-        guard
-            let contentEndIndex = self.index(self.endIndex, offsetBy: -Int(paddingLength), limitedBy: contentStartIndex)
-        else {
-            throw NIOSSHError.excessPadding
-        }
-
-        self = self[contentStartIndex..<contentEndIndex]
-    }
-}
-
 extension AES.GCM.SealedBox {
-    fileprivate init(nonce: SSHAESGCMNonce, ciphertext: ByteBufferView, tag: ByteBufferView) throws {
+    fileprivate init(nonce: AES.GCM.Nonce, ciphertext: ByteBufferView, tag: ByteBufferView) throws {
         // As a workaround for a Swift Crypto inefficiency, we create the combined representation
         // directly.
         var combined: [UInt8] = []
-        combined.reserveCapacity(nonce.count + ciphertext.count + tag.count)
-
-        combined.append(contentsOf: nonce)
+        nonce.withUnsafeBytes { nonceBytes in
+            combined.reserveCapacity(nonceBytes.count + ciphertext.count + tag.count)
+            combined.append(contentsOf: nonceBytes)
+        }
         combined.append(contentsOf: ciphertext)
         combined.append(contentsOf: tag)
 
