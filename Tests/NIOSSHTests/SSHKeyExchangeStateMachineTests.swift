@@ -658,7 +658,7 @@ final class SSHKeyExchangeStateMachineTests: XCTestCase {
         // exercises the dual-accept guard fix AND the verify-side cross-tag fix — not just the
         // sign/verify SHA-symmetry.
         var wire = allocator.buffer(capacity: 1024)
-        wire.writeKeyExchangeECDHReplyMessage(ecdhReply)
+        _ = wire.writeKeyExchangeECDHReplyMessage(ecdhReply)
         let wireReply = try XCTUnwrap(try wire.readKeyExchangeECDHReplyMessage())
         // The parsed host key carries the ssh-rsa wire prefix and is tagged .rsaSHA256.
         XCTAssertTrue(wireReply.hostKey.keyPrefix.elementsEqual("ssh-rsa".utf8))
