@@ -71,9 +71,10 @@ judge_tests() {
 usage() { echo "usage: $0 [--full | --only <stage> | --list]" >&2; exit 64; }
 
 # A stage in BUILD_HOST_STAGES builds on this machine: it runs xcodebuild, or it sits outside the fast set and
-# compiles Swift, renders DocC or starts a container. It runs only on the build host: LocalHostName
-# ahmeds-mac-studio AND the marker file ~/.shell-build-host (Shell's remote_is_build_host; Shell's
-# Scripts/tests/gates-build-host-runner-test.sh holds the two equal). Off it, a run that selects one is refused
+# compiles Swift, renders DocC or starts a container. It runs only on the build host: the Mac whose host registry
+# (build-tools; ${BUILD_HOSTS_FILE:-~/.config/build-tools/hosts}) has a `self` record naming a host whose roles
+# include build. That is build-tools' hosts_is_build_host, read here with awk because the runner sources nothing
+# (Shell's Scripts/tests/gates-build-host-runner-test.sh holds the two equal). Off it, a run that selects one is refused
 # before any stage starts, with exit 75 (EX_TEMPFAIL). Every repo declares the set, empty when no stage builds
 # there. An undeclared set, or an entry that names no stage_<name>, is a config error: exit 78 (EX_CONFIG),
 # checked before anything else, --list included. REPO names the kit in the refusal.
@@ -101,10 +102,12 @@ for stage in "${STAGES[@]}"; do
     for x in ${BUILD_HOST_STAGES[@]+"${BUILD_HOST_STAGES[@]}"}; do [[ "$stage" == "$x" ]] && heavy+=("$stage"); done
 done
 if ((${#heavy[@]})); then
-    here="$(/usr/sbin/scutil --get LocalHostName 2>/dev/null || true)"
-    if [[ "$(printf '%s' "$here" | /usr/bin/tr 'A-Z' 'a-z')" != ahmeds-mac-studio \
-          || ! -f "${HOME:-/nonexistent}/.shell-build-host" ]]; then
-        echo "refusing: $REPO stage(s) ${heavy[*]} build here, and ${here:-this machine} is not the build host." >&2
+    hosts="${BUILD_HOSTS_FILE:-${HOME:-/nonexistent}/.config/build-tools/hosts}"
+    here="$(/usr/bin/awk '$1 == "self" { print $2; exit }' "$hosts" 2>/dev/null)"
+    if [[ -z "$here" ]] || ! /usr/bin/awk -v me="$here" '$1 == "host" && $2 == me {
+            for (i = 3; i <= NF; i++) if ($i ~ /^roles=/) { n = split(substr($i, 7), r, ","); for (j = 1; j <= n; j++) if (r[j] == "build") b = 1 }
+        } END { exit !b }' "$hosts" 2>/dev/null; then
+        echo "refusing: $REPO stage(s) ${heavy[*]} build here, and this Mac (${here:-no self record in $hosts}) is not the build host." >&2
         echo "Run them there, from Shell: Scripts/remote-kit-test.sh $REPO --gates [--full | --only <stage>]" >&2
         echo "From a worktree, prefix SHELL_REMOTE_SRC_$(printf '%s' "$REPO" | /usr/bin/tr -c '[:alnum:]_' '_')=$PWD" >&2
         exit 75
