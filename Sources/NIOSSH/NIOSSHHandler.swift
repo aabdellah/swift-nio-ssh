@@ -117,7 +117,8 @@ public final class NIOSSHHandler {
         self.multiplexer = SSHChannelMultiplexer(
             delegate: self,
             allocator: allocator,
-            childChannelInitializer: inboundChildChannelInitializer
+            childChannelInitializer: inboundChildChannelInitializer,
+            maximumPacketSize: role.maximumPacketSize
         )
         if let limit = role.rekeyLimit {
             self.rekeyController = RekeyController(limit: limit)

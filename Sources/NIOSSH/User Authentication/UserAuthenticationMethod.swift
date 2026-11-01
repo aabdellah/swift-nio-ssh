@@ -341,6 +341,7 @@ enum NIOSSHUserAuthenticationResponseMessage {
     case success
     case failure(SSHMessage.UserAuthFailureMessage)
     case publicKeyOK(SSHMessage.UserAuthPKOKMessage)
+    case disconnect(SSHMessage.DisconnectMessage)
 }
 
 extension NIOSSHUserAuthenticationResponseMessage {

@@ -152,6 +152,8 @@ extension AcceptsUserAuthMessages {
             return SSHMultiMessage(.userAuthFailure(message))
         case .publicKeyOK(let message):
             return SSHMultiMessage(.userAuthPKOK(message))
+        case .disconnect(let disconnect):
+            return SSHMultiMessage(.disconnect(disconnect))
         }
     }
 

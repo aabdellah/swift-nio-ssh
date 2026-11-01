@@ -33,12 +33,21 @@ struct UserAuthenticationStateMachine {
     /// by the byte alone would silently corrupt password authentication.
     private(set) var clientInFlightMethodIsKeyboardInteractive: Bool = false
 
-    // TODO: The server SHOULD limit the number of authentication attempts the client may make.
+    /// The maximum number of `SSH_MSG_USERAUTH_REQUEST` messages this server will process before
+    /// disconnecting. Taken from `SSHServerConfiguration`; `.max` for clients, which never enforce it.
+    private let maxAuthAttempts: Int
+
     init(role: SSHConnectionRole, loop: EventLoop, sessionID: ByteBuffer) {
         self.state = .idle
         self.delegate = UserAuthDelegate(role: role)
         self.loop = loop
         self.sessionID = sessionID
+        switch role {
+        case .server(let configuration):
+            self.maxAuthAttempts = configuration.maxAuthAttempts ?? Constants.defaultMaxAuthAttempts
+        case .client:
+            self.maxAuthAttempts = .max
+        }
     }
 
     mutating func setServerSignatureAlgorithms(_ algorithms: [Substring]) {
@@ -48,6 +57,12 @@ struct UserAuthenticationStateMachine {
     fileprivate static let serviceName: String = "ssh-userauth"
 
     fileprivate static let nextServiceName: String = "ssh-connection"
+
+    private static let tooManyTriesDisconnect = SSHMessage.DisconnectMessage(
+        reason: 11,  // SSH_DISCONNECT_BY_APPLICATION
+        description: "Too many authentication failures",
+        tag: ""
+    )
 }
 
 extension UserAuthenticationStateMachine {
@@ -55,8 +70,8 @@ extension UserAuthenticationStateMachine {
         /// In this state, we have not received any user auth messages yet
         case idle
         case awaitingServiceAcceptance
-        case awaitingNextRequest
-        case awaitingResponses(Int)
+        case awaitingNextRequest(attempts: Int)
+        case awaitingResponses(attempts: Int, pending: Int)
         case authenticationSucceeded
         case authenticationFailed
     }
@@ -98,8 +113,8 @@ extension UserAuthenticationStateMachine {
             return nil
 
         case (.server, .authenticationFailed):
-            // TODO(cory): We should be limiting the maximum number of authentication attempts.
-            preconditionFailure("Servers cannot enter authentication failed")
+            // We have already emitted a disconnect; ignore anything still in flight.
+            return nil
 
         case (.client, _):
             // Clients may never receive user service request messages.
@@ -124,7 +139,7 @@ extension UserAuthenticationStateMachine {
             }
 
             // Cool, we can begin the auth dance.
-            self.state = .awaitingNextRequest
+            self.state = .awaitingNextRequest(attempts: 0)
             return self.requestNextAuthRequest(methods: .all, delegate: delegate)
         case (.client, .authenticationSucceeded):
             // We should ignore all further auth messages in this state.
@@ -164,12 +179,20 @@ extension UserAuthenticationStateMachine {
         }
 
         switch (self.delegate, self.state) {
-        case (.server(let delegate), .awaitingNextRequest):
-            self.state = .awaitingResponses(1)
+        case (.server(let delegate), .awaitingNextRequest(let attempts)):
+            guard attempts < self.maxAuthAttempts else {
+                self.state = .authenticationFailed
+                return self.loop.makeSucceededFuture(.disconnect(Self.tooManyTriesDisconnect))
+            }
+            self.state = .awaitingResponses(attempts: attempts + 1, pending: 1)
             return self.nextAuthResponse(request: message, delegate: delegate)
 
-        case (.server(let delegate), .awaitingResponses(let pending)):
-            self.state = .awaitingResponses(pending + 1)
+        case (.server(let delegate), .awaitingResponses(let attempts, let pending)):
+            guard attempts < self.maxAuthAttempts else {
+                self.state = .authenticationFailed
+                return self.loop.makeSucceededFuture(.disconnect(Self.tooManyTriesDisconnect))
+            }
+            self.state = .awaitingResponses(attempts: attempts + 1, pending: pending + 1)
             return self.nextAuthResponse(request: message, delegate: delegate)
 
         case (.server, .idle), (.server, .awaitingServiceAcceptance):
@@ -183,8 +206,8 @@ extension UserAuthenticationStateMachine {
             return nil
 
         case (.server, .authenticationFailed):
-            // TODO(cory): We should be limiting the maximum number of authentication attempts.
-            preconditionFailure("Servers cannot enter authentication failed")
+            // We have already emitted a disconnect; ignore anything still in flight.
+            return nil
 
         case (.client, _):
             // Clients may never receive user auth request messages.
@@ -231,9 +254,9 @@ extension UserAuthenticationStateMachine {
         _ message: SSHMessage.UserAuthFailureMessage
     ) throws -> EventLoopFuture<SSHMessage.UserAuthRequestMessage?>? {
         switch (self.delegate, self.state) {
-        case (.client(let delegate), .awaitingResponses(let responseCount)):
+        case (.client(let delegate), .awaitingResponses(let attempts, let responseCount)):
             // Ok, the server didn't like that much. Let's try another one.
-            self.state = .awaitingNextRequest
+            self.state = .awaitingNextRequest(attempts: attempts)
             precondition(responseCount == 1, "We don't support parallel authentication attempts yet!")
             let methods = NIOSSHAvailableUserAuthenticationMethods(message)
             // RFC 4252 §5.1: a failure with `partial success = true` means the previous method
@@ -288,8 +311,8 @@ extension UserAuthenticationStateMachine {
                 )
             }
 
-            // RFC 4256 ยง3.3: a zero-prompt request is answered with an empty INFO_RESPONSE
-            // and no user interaction (matching OpenSSH behaviour).
+            // RFC 4256 §3.3: a zero-prompt request is answered with an empty INFO_RESPONSE
+            // and no user interaction (matching OpenSSH behavior).
             if message.prompts.isEmpty {
                 return self.loop.makeSucceededFuture(.init(responses: []))
             }
@@ -307,7 +330,7 @@ extension UserAuthenticationStateMachine {
             )
 
             return promise.futureResult.flatMapThrowing { responses in
-                // RFC 4256 ยง3.4: num-responses MUST equal num-prompts.
+                // RFC 4256 §3.4: num-responses MUST equal num-prompts.
                 guard responses.count == expectedResponseCount else {
                     throw NIOSSHError.protocolViolation(
                         protocolName: Self.protocolName,
@@ -385,7 +408,7 @@ extension UserAuthenticationStateMachine {
         switch (self.delegate, self.state) {
         case (.server, .awaitingServiceAcceptance):
             precondition(message.service == Self.serviceName)
-            self.state = .awaitingNextRequest
+            self.state = .awaitingNextRequest(attempts: 0)
         case (.server, .idle):
             preconditionFailure("Cannot accept a service that hasn't been requested")
         case (.server, .awaitingNextRequest),
@@ -400,13 +423,13 @@ extension UserAuthenticationStateMachine {
 
     mutating func sendUserAuthRequest(_ message: SSHMessage.UserAuthRequestMessage) {
         switch (self.delegate, self.state) {
-        case (.client, .awaitingNextRequest):
+        case (.client, .awaitingNextRequest(let attempts)):
             if case .keyboardInteractive = message.method {
                 self.clientInFlightMethodIsKeyboardInteractive = true
             } else {
                 self.clientInFlightMethodIsKeyboardInteractive = false
             }
-            self.state = .awaitingResponses(1)
+            self.state = .awaitingResponses(attempts: attempts, pending: 1)
         case (.client, .idle),
             (.client, .awaitingServiceAcceptance):
             preconditionFailure("Sent an auth request without asking us first")
@@ -432,11 +455,11 @@ extension UserAuthenticationStateMachine {
             preconditionFailure("Server sent an auth response prior to receiving an auth request")
         case (.server, .awaitingNextRequest):
             preconditionFailure("Too many auth responses sent")
-        case (.server, .awaitingResponses(let responseCount)):
+        case (.server, .awaitingResponses(let attempts, let responseCount)):
             if responseCount > 1 {
-                self.state = .awaitingResponses(responseCount - 1)
+                self.state = .awaitingResponses(attempts: attempts, pending: responseCount - 1)
             } else {
-                self.state = .awaitingNextRequest
+                self.state = .awaitingNextRequest(attempts: attempts)
             }
         case (.server, .authenticationSucceeded):
             preconditionFailure("Authentication already succeeded, further messages are unnecessary.")
@@ -482,13 +505,13 @@ extension UserAuthenticationStateMachine {
             preconditionFailure("Server sent an auth response prior to receiving an auth request")
         case (.server, .awaitingNextRequest):
             preconditionFailure("Too many auth responses sent")
-        case (.server, .awaitingResponses(let responseCount)):
+        case (.server, .awaitingResponses(let attempts, let responseCount)):
             if success {
                 self.state = .authenticationSucceeded
             } else if responseCount > 1 {
-                self.state = .awaitingResponses(responseCount - 1)
+                self.state = .awaitingResponses(attempts: attempts, pending: responseCount - 1)
             } else {
-                self.state = .awaitingNextRequest
+                self.state = .awaitingNextRequest(attempts: attempts)
             }
         case (.server, .authenticationSucceeded):
             preconditionFailure("Authentication already succeeded, further messages are unnecessary.")

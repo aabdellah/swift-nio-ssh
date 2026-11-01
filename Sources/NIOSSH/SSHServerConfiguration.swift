@@ -38,9 +38,39 @@ public struct SSHServerConfiguration {
 
     /// Whether to advertise and negotiate zlib compression. When `true`, the server
     /// offers `["zlib@openssh.com", "zlib", "none"]` in KEX_INIT; when `false`
-    /// (the default) it offers only `["none"]`, keeping behaviour byte-identical
+    /// (the default) it offers only `["none"]`, keeping behavior byte-identical
     /// to releases that predated compression support.
     public var enableCompression: Bool
+
+    /// The maximum size, in bytes, of a channel data payload this peer is willing to receive (the
+    /// "maximum packet size" of an SSH channel, RFC 4254 §5.1). It is advertised to the remote peer
+    /// when opening channels and bounds inbound encrypted packets. Defaults to `1 << 17`  (128 KiB).
+    ///
+    /// The per-channel receive window we advertise is a fixed multiple of this value (64x), so raising
+    /// this value raises the window proportionally. The window is stored as an `Int32`, meaning
+    /// values above ~33 MiB (`Int32.max / 64`) saturate the window.
+    ///
+    /// - Precondition: Must be at least 32768 bytes, the uncompressed payload size
+    ///   RFC 4253 §6.1 requires every implementation to support.
+    /// - Precondition: The packet size must leave 1024 bytes for headers and framing.
+    public var maximumPacketSize: Int = Constants.defaultMaximumChannelPacketSize {
+        didSet {
+            precondition(
+                self.maximumPacketSize >= Constants.minimumChannelPacketSize,
+                "maximumPacketSize must be at least \(Constants.minimumChannelPacketSize) bytes (RFC 4253 §6.1)"
+            )
+            precondition(
+                self.maximumPacketSize <= Constants.maximumChannelPacketSize,
+                "maximumPacketSize must leave room for SSH framing and padding (RFC 4253 §6)."
+            )
+        }
+    }
+
+    /// The maximum number of `SSH_MSG_USERAUTH_REQUEST` messages the server will process on a
+    /// single connection before disconnecting the client. Every request counts, including
+    /// authentication probes. Defaults to 1024; set to `Int.max` to effectively disable the limit.
+    /// Must be positive: a value of 0 or less disconnects every client on its first request.
+    public var maxAuthAttempts: Int? = nil
 
     public init(
         hostKeys: [NIOSSHPrivateKey],

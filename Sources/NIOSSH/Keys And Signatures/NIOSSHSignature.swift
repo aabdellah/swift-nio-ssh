@@ -439,13 +439,11 @@ private struct ECDSASignatureHelper {
         let rByteView = r.mpIntView
         let sByteView = s.mpIntView
 
-        // A well-formed ECDSA signature integer is at most `pointSize` bytes after the mpint sign byte
-        // is stripped. An over-length `r`/`s` (from malformed or hostile input) would make the storage
-        // offset below negative and trap the process on the `storagePtr[offset..<pointSize]` rebase —
-        // uncatchable by `try`. Reject it as an invalid signature instead. This path is reachable from
-        // untrusted bytes via the public `NIOSSHSignature(buffer:)` and during host-key verification.
+        // The r and s components are attacker-controlled and parsed pre-authentication. Neither may be
+        // wider than the curve's point size: a larger value produces a negative starting offset below and
+        // an out-of-bounds write into the stack storage.
         guard rByteView.count <= pointSize, sByteView.count <= pointSize else {
-            throw NIOSSHError.invalidSSHMessage(reason: "ECDSA signature integer exceeds curve point size")
+            throw NIOSSHError.invalidSSHMessage(reason: "ECDSA signature mpint exceeds curve point size")
         }
 
         let rByteStartingOffset = pointSize - rByteView.count
